@@ -3,6 +3,7 @@ export const config = { runtime: "edge" };
 const REDIRECT_URI = "https://spending-tracker-bramble.vercel.app/callback";
 const TOKEN_URL = "https://auth.truelayer-sandbox.com/connect/token";
 const APP_URL = "https://spending-tracker-bramble.vercel.app";
+const APP_SCHEME = "care.bramble.spending";
 
 export default async function handler(request: Request): Promise<Response> {
   const url = new URL(request.url);
@@ -41,8 +42,13 @@ export default async function handler(request: Request): Promise<Response> {
   };
 
   const expiresAt = Date.now() + expires_in * 1000;
+  const tokenParams = `tl_token=${encodeURIComponent(access_token)}&tl_expires=${expiresAt}`;
 
-  return Response.redirect(
-    `${APP_URL}/?tl_token=${encodeURIComponent(access_token)}&tl_expires=${expiresAt}`,
-  );
+  // native app flow: redirect to custom scheme so Android hands control back to the app
+  const state = url.searchParams.get("state");
+  if (state === "native") {
+    return Response.redirect(`${APP_SCHEME}://callback?${tokenParams}`);
+  }
+
+  return Response.redirect(`${APP_URL}/?${tokenParams}`);
 }

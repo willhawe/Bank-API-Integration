@@ -1,3 +1,6 @@
+import { App as CapApp } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
+import { Capacitor } from "@capacitor/core";
 import { useEffect, useState } from "react";
 import { AccountSplit } from "./components/AccountSplit";
 import { CategoryPicker } from "./components/CategoryPicker";
@@ -9,27 +12,45 @@ import { WeeklyChart } from "./components/WeeklyChart";
 import { hasTrueLayerToken, saveTrueLayerToken } from "./data";
 import { useSpendingTracker } from "./hooks/useSpendingTracker";
 
+function extractToken(search: string): { token: string; expires: number } | null {
+  const params = new URLSearchParams(search);
+  const token = params.get("tl_token");
+  const expires = params.get("tl_expires");
+  if (token && expires) return { token, expires: Number(expires) };
+  return null;
+}
+
 function useTokenFromUrl() {
   const [connected, setConnected] = useState(hasTrueLayerToken);
 
+  // Web: token arrives in URL search params after OAuth redirect
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get("tl_token");
-    const expires = params.get("tl_expires");
-
-    if (token && expires) {
-      saveTrueLayerToken(token, Number(expires));
+    const result = extractToken(window.location.search);
+    if (result) {
+      saveTrueLayerToken(result.token, result.expires);
       setConnected(true);
-      // Clean token out of URL without a page reload
-      const clean = window.location.pathname;
-      window.history.replaceState({}, "", clean);
-    }
-
-    const error = params.get("tl_error");
-    if (error) {
-      console.error("TrueLayer auth error:", error);
       window.history.replaceState({}, "", window.location.pathname);
     }
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tl_error")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  // Native: token arrives via deep link care.bramble.spending://callback?tl_token=...
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const listener = CapApp.addListener("appUrlOpen", async ({ url }) => {
+      const result = extractToken(new URL(url).search);
+      if (result) {
+        saveTrueLayerToken(result.token, result.expires);
+        setConnected(true);
+        await Browser.close();
+      }
+    });
+
+    return () => { void listener.then((l) => l.remove()); };
   }, []);
 
   return { connected, setConnected };

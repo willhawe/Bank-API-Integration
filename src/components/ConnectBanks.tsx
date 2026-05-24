@@ -1,13 +1,31 @@
+import { Browser } from "@capacitor/browser";
+import { Capacitor } from "@capacitor/core";
 import { clearTrueLayerToken } from "../data";
 
 const CLIENT_ID = "sandbox-spendingwidget-9fdf0c";
 const REDIRECT_URI = "https://spending-tracker-bramble.vercel.app/callback";
-const AUTH_URL =
-  `https://auth.truelayer-sandbox.com/?response_type=code` +
-  `&client_id=${CLIENT_ID}` +
-  `&scope=accounts%20transactions` +
-  `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-  `&providers=uk-ob-all%20uk-oauth-all`;
+
+function buildAuthUrl(native: boolean) {
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: CLIENT_ID,
+    scope: "accounts transactions",
+    redirect_uri: REDIRECT_URI,
+    providers: "uk-ob-all uk-oauth-all",
+    ...(native ? { state: "native" } : {}),
+  });
+  return `https://auth.truelayer-sandbox.com/?${params.toString()}`;
+}
+
+async function openAuth() {
+  const isNative = Capacitor.isNativePlatform();
+  const url = buildAuthUrl(isNative);
+  if (isNative) {
+    await Browser.open({ url, presentationStyle: "popover" });
+  } else {
+    window.location.href = url;
+  }
+}
 
 interface ConnectBanksProps {
   connected: boolean;
@@ -39,9 +57,13 @@ export function ConnectBanks({ connected, onDisconnect }: ConnectBanksProps) {
   return (
     <div className="connect-banks">
       <p className="connect-banks__label">Using demo data</p>
-      <a href={AUTH_URL} className="connect-banks__btn">
+      <button
+        type="button"
+        className="connect-banks__btn"
+        onClick={() => void openAuth()}
+      >
         Connect your banks
-      </a>
+      </button>
     </div>
   );
 }
