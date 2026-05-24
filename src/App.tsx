@@ -1,12 +1,43 @@
+import { useEffect, useState } from "react";
 import { AccountSplit } from "./components/AccountSplit";
 import { CategoryPicker } from "./components/CategoryPicker";
 import { CategoryTotals } from "./components/CategoryTotals";
+import { ConnectBanks } from "./components/ConnectBanks";
 import { SpentTodayHeader } from "./components/SpentTodayHeader";
 import { TransactionRow } from "./components/TransactionRow";
 import { WeeklyChart } from "./components/WeeklyChart";
+import { hasTrueLayerToken, saveTrueLayerToken } from "./data";
 import { useSpendingTracker } from "./hooks/useSpendingTracker";
 
+function useTokenFromUrl() {
+  const [connected, setConnected] = useState(hasTrueLayerToken);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("tl_token");
+    const expires = params.get("tl_expires");
+
+    if (token && expires) {
+      saveTrueLayerToken(token, Number(expires));
+      setConnected(true);
+      // Clean token out of URL without a page reload
+      const clean = window.location.pathname;
+      window.history.replaceState({}, "", clean);
+    }
+
+    const error = params.get("tl_error");
+    if (error) {
+      console.error("TrueLayer auth error:", error);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  return { connected, setConnected };
+}
+
 export default function App() {
+  const { connected, setConnected } = useTokenFromUrl();
+
   const {
     todayTransactions,
     spentToday,
@@ -32,6 +63,14 @@ export default function App() {
         uncategorisedCount={uncategorisedCount}
       />
 
+      <ConnectBanks
+        connected={connected}
+        onDisconnect={() => {
+          setConnected(false);
+          void resetDemoData();
+        }}
+      />
+
       <WeeklyChart dailyTotals={weekDailyTotals} weekTotal={weekTotal} />
 
       <AccountSplit totals={todayAccountTotals} />
@@ -41,13 +80,15 @@ export default function App() {
       <section className="transactions-section">
         <div className="section-header">
           <h2 className="section-title">Today&apos;s transactions</h2>
-          <button
-            type="button"
-            className="text-btn"
-            onClick={() => void resetDemoData()}
-          >
-            Reset demo
-          </button>
+          {!connected && (
+            <button
+              type="button"
+              className="text-btn"
+              onClick={() => void resetDemoData()}
+            >
+              Reset demo
+            </button>
+          )}
         </div>
 
         {error && <p className="error-banner">{error}</p>}
