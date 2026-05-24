@@ -2,7 +2,7 @@ import { Browser } from "@capacitor/browser";
 import { Capacitor } from "@capacitor/core";
 import { clearTrueLayerToken } from "../data";
 
-const CLIENT_ID = "sandbox-spendingwidget-9fdf0c";
+const CLIENT_ID = "spendingwidget-9fdf0c";
 const REDIRECT_URI = "https://spending-tracker-bramble.vercel.app/callback";
 
 function buildAuthUrl(native: boolean) {
@@ -11,7 +11,7 @@ function buildAuthUrl(native: boolean) {
     client_id: CLIENT_ID,
     scope: "accounts transactions",
     redirect_uri: REDIRECT_URI,
-    providers: "mock",
+    providers: "uk-ob-all uk-oauth-all",
     ...(native ? { state: "native" } : {}),
   });
   return `https://auth.truelayer-sandbox.com/?${params.toString()}`;

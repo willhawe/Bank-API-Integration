@@ -1,6 +1,6 @@
 export const config = { runtime: "edge" };
 
-const API_BASE = "https://api.truelayer-sandbox.com/data/v1";
+const API_BASE = "https://api.truelayer.com/data/v1";
 
 interface TLAccount {
   account_id: string;

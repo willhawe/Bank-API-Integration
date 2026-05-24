@@ -1,7 +1,7 @@
 export const config = { runtime: "edge" };
 
 const REDIRECT_URI = "https://spending-tracker-bramble.vercel.app/callback";
-const TOKEN_URL = "https://auth.truelayer-sandbox.com/connect/token";
+const TOKEN_URL = "https://auth.truelayer.com/connect/token";
 const APP_URL = "https://spending-tracker-bramble.vercel.app";
 const APP_SCHEME = "care.bramble.spending";
 
