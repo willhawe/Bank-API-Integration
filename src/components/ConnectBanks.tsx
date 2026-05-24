@@ -11,7 +11,7 @@ function buildAuthUrl(native: boolean) {
     client_id: CLIENT_ID,
     scope: "accounts transactions",
     redirect_uri: REDIRECT_URI,
-    providers: "uk-ob-all uk-oauth-all",
+    providers: "mock",
     ...(native ? { state: "native" } : {}),
   });
   return `https://auth.truelayer-sandbox.com/?${params.toString()}`;
