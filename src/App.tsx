@@ -9,10 +9,30 @@ import {
   getNotificationSummary,
   openNotificationAccessSettings,
   setPaymentCategory,
+  syncCategoryBreakdown,
   type ScannedPayment,
   type NotificationSummary,
 } from "./plugins/WidgetBridge";
-import { syncPayments, getSupabaseRowUrl, type SyncStatus } from "./supabase";
+import {
+  syncPayments,
+  getSupabaseRowUrl,
+  isSupabaseConfigured,
+  getTransactionBreakdown,
+  getMonthlyCategoryTotals,
+  saveReceiptImage,
+  addReceiptItem,
+  removeReceiptItem,
+  type SyncStatus,
+  type TransactionBreakdown,
+} from "./supabase";
+import { captureReceiptPhoto } from "./receipt";
+import {
+  CATEGORIES,
+  categoryClassName,
+  inferCategory,
+  loadCustomCategories,
+  saveCustomCategories,
+} from "./categories";
 
 export default function App() {
   const [summary, setSummary] = useState<NotificationSummary>({
@@ -28,6 +48,13 @@ export default function App() {
   const [importMessage, setImportMessage] = useState("");
   const [openPaymentMenuId, setOpenPaymentMenuId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [breakdowns, setBreakdowns] = useState<Record<string, TransactionBreakdown>>({});
+  const [scanBusyId, setScanBusyId] = useState<string | null>(null);
+  const [itemDraftName, setItemDraftName] = useState("");
+  const [itemDraftPrice, setItemDraftPrice] = useState("");
+  const [breakdownMessage, setBreakdownMessage] = useState("");
+  const [customCategories, setCustomCategories] = useState<string[]>(() => loadCustomCategories());
+  const [categoryDraft, setCategoryDraft] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -48,10 +75,27 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    void syncMonthlyCategoryWidget();
+  }, []);
+
+  useEffect(() => {
+    document.body.style.overflow = openPaymentMenuId ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [openPaymentMenuId]);
+
+  async function syncMonthlyCategoryWidget() {
+    const totals = await getMonthlyCategoryTotals();
+    await syncCategoryBreakdown(totals);
+  }
+
   async function refreshSummary() {
     const next = await getNotificationSummary();
     setSummary(next);
     setSyncStatus(await syncPayments(next.payments));
+    await syncMonthlyCategoryWidget();
   }
 
   async function addPayment() {
@@ -83,6 +127,7 @@ export default function App() {
       }
       const status = await syncPayments(payments);
       setSyncStatus(status);
+      await syncMonthlyCategoryWidget();
       setImportMessage(
         status === "synced"
           ? `Imported ${payments.length} payment${payments.length === 1 ? "" : "s"}.`
@@ -120,6 +165,100 @@ export default function App() {
     }
     setOpenPaymentMenuId(null);
     await refreshSummary();
+  }
+
+  async function addCategory(id: string) {
+    const name = categoryDraft.trim();
+    if (!name) return;
+
+    const isNew = ![...CATEGORIES, ...customCategories].some(
+      (option) => option.toLowerCase() === name.toLowerCase(),
+    );
+    if (isNew) {
+      const next = [...customCategories, name];
+      setCustomCategories(next);
+      saveCustomCategories(next);
+    }
+
+    setCategoryDraft("");
+    await chooseCategory(id, name);
+  }
+
+  function togglePaymentMenu(id: string) {
+    const opening = openPaymentMenuId !== id;
+    setOpenPaymentMenuId(opening ? id : null);
+    setItemDraftName("");
+    setItemDraftPrice("");
+    setBreakdownMessage("");
+    setCategoryDraft("");
+    if (opening && !breakdowns[id]) {
+      void loadBreakdown(id);
+    }
+  }
+
+  async function loadBreakdown(id: string) {
+    const detail = await getTransactionBreakdown(id);
+    if (detail) setBreakdowns((prev) => ({ ...prev, [id]: detail }));
+  }
+
+  async function scanReceipt(id: string) {
+    setScanBusyId(id);
+    setBreakdownMessage("");
+    try {
+      const image = await captureReceiptPhoto();
+      if (!image) {
+        setBreakdownMessage("No photo captured.");
+        return;
+      }
+      const ok = await saveReceiptImage(id, image);
+      setBreakdownMessage(ok ? "Receipt saved." : "Could not save receipt.");
+      if (ok) {
+        setBreakdowns((prev) => ({
+          ...prev,
+          [id]: { items: prev[id]?.items ?? [], receiptImage: image },
+        }));
+      }
+    } finally {
+      setScanBusyId(null);
+    }
+  }
+
+  async function addItem(id: string) {
+    const name = itemDraftName.trim();
+    const priceCents = parseAmountCents(itemDraftPrice);
+    if (!name || priceCents <= 0) {
+      setBreakdownMessage("Enter an item name and price.");
+      return;
+    }
+
+    const item = await addReceiptItem(id, name, priceCents);
+    if (item) {
+      setBreakdowns((prev) => ({
+        ...prev,
+        [id]: {
+          receiptImage: prev[id]?.receiptImage ?? null,
+          items: [...(prev[id]?.items ?? []), item],
+        },
+      }));
+      setItemDraftName("");
+      setItemDraftPrice("");
+      setBreakdownMessage("");
+    } else {
+      setBreakdownMessage("Could not save item.");
+    }
+  }
+
+  async function removeItem(id: string, itemId: number) {
+    const ok = await removeReceiptItem(itemId);
+    if (ok) {
+      setBreakdowns((prev) => ({
+        ...prev,
+        [id]: {
+          receiptImage: prev[id]?.receiptImage ?? null,
+          items: (prev[id]?.items ?? []).filter((item) => item.id !== itemId),
+        },
+      }));
+    }
   }
 
   const activePayments = summary.payments.filter((payment) => !payment.deleted);
@@ -235,10 +374,15 @@ export default function App() {
         </div>
         {activePayments.length > 0 ? (
           <ul className="payment-list">
-            {activePayments.map((payment, index) => {
+            {(() => {
+              const allCategories = [...CATEGORIES.slice(0, -1), ...customCategories, "Other"];
+              return activePayments.map((payment, index) => {
               const menuOpen = openPaymentMenuId === payment.id;
               const category = payment.category ?? inferCategory(payment.merchant);
               const rowUrl = getSupabaseRowUrl(payment.id);
+              const breakdown = breakdowns[payment.id];
+              const items = breakdown?.items ?? [];
+              const itemsTotalCents = items.reduce((total, item) => total + item.priceCents, 0);
 
               return (
                 <li key={`${payment.merchant}-${payment.amount}-${index}`} className="last-alert__row">
@@ -255,28 +399,143 @@ export default function App() {
                       className="payment-actions__menu"
                       aria-expanded={menuOpen}
                       aria-label={`Payment actions for ${payment.merchant} ${payment.amount}`}
-                      onClick={() => setOpenPaymentMenuId(menuOpen ? null : payment.id)}
+                      onClick={() => togglePaymentMenu(payment.id)}
                     >
                       ...
                     </button>
-                    {menuOpen && (
-                      <div className="payment-menu" role="menu">
-                        <p className="payment-menu__label">Category</p>
-                        <div className="payment-menu__categories">
-                          {CATEGORIES.map((option) => (
-                            <button
-                              key={option}
-                              type="button"
-                              className={
-                                option === category
-                                  ? "payment-menu__category payment-menu__category--active"
-                                  : "payment-menu__category"
-                              }
-                              onClick={() => void chooseCategory(payment.id, option)}
-                            >
-                              {option}
+                  </div>
+                  {menuOpen && (
+                    <div className="payment-menu-overlay">
+                      <div
+                        className="payment-menu-backdrop"
+                        onClick={() => setOpenPaymentMenuId(null)}
+                      />
+                      <div
+                        className="payment-menu"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`Payment actions for ${payment.merchant} ${payment.amount}`}
+                      >
+                        <button
+                          type="button"
+                          className="payment-menu__handle"
+                          aria-label="Close"
+                          onClick={() => setOpenPaymentMenuId(null)}
+                        />
+                        <div className="payment-menu__sheet-header">
+                          <div className="payment-menu__sheet-title">
+                            <span>{payment.merchant}</span>
+                            <strong>{payment.amount}</strong>
+                          </div>
+                          <button
+                            type="button"
+                            className="payment-menu__close"
+                            aria-label="Close menu"
+                            onClick={() => setOpenPaymentMenuId(null)}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        <div className="payment-menu__body">
+                          <p className="payment-menu__label">Category</p>
+                          <div className="payment-menu__categories">
+                            {allCategories.map((option) => (
+                              <button
+                                key={option}
+                                type="button"
+                                className={
+                                  option === category
+                                    ? "payment-menu__category payment-menu__category--active"
+                                    : "payment-menu__category"
+                                }
+                                onClick={() => void chooseCategory(payment.id, option)}
+                              >
+                                {option}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="payment-menu__add-category">
+                            <input
+                              value={categoryDraft}
+                              onChange={(event) => setCategoryDraft(event.target.value)}
+                              placeholder="New category"
+                              inputMode="text"
+                            />
+                            <button type="button" onClick={() => void addCategory(payment.id)}>
+                              Add
                             </button>
-                          ))}
+                          </div>
+                          {isSupabaseConfigured() && (
+                            <div className="payment-menu__section">
+                              <p className="payment-menu__label">Receipt</p>
+                              <div className="receipt-scan-row">
+                                {breakdown?.receiptImage && (
+                                  <button
+                                    type="button"
+                                    className="receipt-thumb"
+                                    aria-label={`View receipt photo for ${payment.merchant}`}
+                                    onClick={() =>
+                                      window.open(breakdown.receiptImage as string, "_blank", "noopener,noreferrer")
+                                    }
+                                  >
+                                    <img src={breakdown.receiptImage} alt="" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="scan-receipt-btn"
+                                  disabled={scanBusyId === payment.id}
+                                  onClick={() => void scanReceipt(payment.id)}
+                                >
+                                  {scanBusyId === payment.id
+                                    ? "Scanning..."
+                                    : breakdown?.receiptImage
+                                      ? "Retake photo"
+                                      : "Scan receipt"}
+                                </button>
+                              </div>
+
+                              <p className="payment-menu__label">
+                                Items{items.length > 0 ? ` — ${formatGbp(itemsTotalCents)}` : ""}
+                              </p>
+                              {items.length > 0 && (
+                                <ul className="receipt-items">
+                                  {items.map((item) => (
+                                    <li key={item.id} className="receipt-items__row">
+                                      <span>{item.name}</span>
+                                      <strong>{formatGbp(item.priceCents)}</strong>
+                                      <button
+                                        type="button"
+                                        className="receipt-items__remove"
+                                        aria-label={`Remove ${item.name}`}
+                                        onClick={() => void removeItem(payment.id, item.id)}
+                                      >
+                                        ×
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                              <div className="receipt-item-add">
+                                <input
+                                  value={itemDraftName}
+                                  onChange={(event) => setItemDraftName(event.target.value)}
+                                  placeholder="Item"
+                                  inputMode="text"
+                                />
+                                <input
+                                  value={itemDraftPrice}
+                                  onChange={(event) => setItemDraftPrice(event.target.value)}
+                                  placeholder="Price"
+                                  inputMode="decimal"
+                                />
+                                <button type="button" onClick={() => void addItem(payment.id)}>
+                                  Add
+                                </button>
+                              </div>
+                              {breakdownMessage && <p className="manual-entry__message">{breakdownMessage}</p>}
+                            </div>
+                          )}
                         </div>
                         <div className="payment-menu__footer">
                           {rowUrl && (
@@ -299,11 +558,12 @@ export default function App() {
                           </button>
                         </div>
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </li>
               );
-            })}
+              });
+            })()}
           </ul>
         ) : (
           <p className="last-alert__empty">No payment notifications scanned today.</p>
@@ -337,50 +597,9 @@ function getCategoryTotals(payments: ScannedPayment[]) {
     .sort((a, b) => b.amountCents - a.amountCents);
 }
 
-const CATEGORIES = [
-  "Transport",
-  "Groceries",
-  "Food",
-  "Shopping",
-  "Entertainment",
-  "Bills",
-  "Travel",
-  "Other",
-] as const;
-
-function inferCategory(merchant: string): string {
-  const value = merchant.toLowerCase();
-  if (/(tfl|rail|railway|train|uber|bolt|taxi|bus|tube|parking|petrol|shell|bp\b)/.test(value)) {
-    return "Transport";
-  }
-  if (/(sainsbury|tesco|waitrose|aldi|lidl|morrisons|ocado|co-op|coop|marks and spencer|m&s)/.test(value)) {
-    return "Groceries";
-  }
-  if (/(pret|caffe|coffee|starbucks|costa|nero|greggs|leon|itsu|mcdonald|restaurant|kitchen|pizza|deliveroo|uber eats)/.test(value)) {
-    return "Food";
-  }
-  if (/(amazon|argos|ikea|john lewis|apple|currys|boots|zara|uniqlo|h&m)/.test(value)) {
-    return "Shopping";
-  }
-  if (/(netflix|spotify|cinema|odeon|vue|theatre|ticketmaster|games|playstation|xbox)/.test(value)) {
-    return "Entertainment";
-  }
-  if (/(octopus|british gas|thames water|ee\b|o2\b|vodafone|three|council tax|insurance|rent|mortgage)/.test(value)) {
-    return "Bills";
-  }
-  if (/(hotel|airline|airways|easyjet|ryanair|ba\.com|booking\.com|airbnb)/.test(value)) {
-    return "Travel";
-  }
-  return "Other";
-}
-
 function formatGbp(cents: number): string {
   return new Intl.NumberFormat("en-GB", {
     style: "currency",
     currency: "GBP",
   }).format(cents / 100);
-}
-
-function categoryClassName(category: string): string {
-  return category.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }

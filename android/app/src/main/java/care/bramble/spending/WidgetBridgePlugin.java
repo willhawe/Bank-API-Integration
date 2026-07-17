@@ -8,10 +8,14 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.provider.Settings;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import org.json.JSONException;
+import org.json.JSONObject;
 
 @CapacitorPlugin(name = "WidgetBridge")
 public class WidgetBridgePlugin extends Plugin {
@@ -101,6 +105,31 @@ public class WidgetBridgePlugin extends Plugin {
 
         BankNotificationStore.deletePayment(getContext(), id);
         call.resolve();
+    }
+
+    @PluginMethod
+    public void setCategoryBreakdown(PluginCall call) {
+        JSArray categories = call.getArray("categories");
+        if (categories == null) {
+            call.reject("categories is required");
+            return;
+        }
+
+        try {
+            org.json.JSONArray stored = new org.json.JSONArray();
+            for (int i = 0; i < categories.length(); i += 1) {
+                JSONObject item = categories.getJSONObject(i);
+                JSONObject entry = new JSONObject();
+                entry.put("category", item.optString("category", "Other"));
+                entry.put("amountCents", item.optInt("amountCents", 0));
+                stored.put(entry);
+            }
+            CategoryBreakdownStore.save(getContext(), stored);
+            MonthlyCategoryWidget.updateAll(getContext());
+            call.resolve();
+        } catch (JSONException e) {
+            call.reject("Invalid categories payload");
+        }
     }
 
     @PluginMethod

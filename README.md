@@ -48,6 +48,30 @@ add column if not exists deleted boolean not null default false,
 add column if not exists deleted_at timestamptz;
 ```
 
+Receipt scanning needs this column:
+
+```sql
+alter table public.transactions
+add column if not exists receipt_image text;
+```
+
+Manual line-item breakdown needs its own table:
+
+```sql
+create table if not exists public.transaction_items (
+  id bigint generated always as identity primary key,
+  transaction_id text not null references public.transactions(id) on delete cascade,
+  name text not null,
+  price_cents integer not null check (price_cents > 0),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists transaction_items_transaction_id_idx
+  on public.transaction_items (transaction_id);
+```
+
+Make sure `transaction_items` has the same row-level security / grants as `transactions` so the app's publishable key can read and write it.
+
 ## What you get in V1
 
 - **Android notification scanner** for Google Wallet, Chase, and Amex-style payment alerts

@@ -5,4 +5,5 @@
     <string name="package_name">care.bramble.spending</string>
     <string name="custom_url_scheme">care.bramble.spending</string>
     <string name="widget_description">Shows your total spending today</string>
+    <string name="widget_monthly_category_description">Shows this month\'s spending by category</string>
 </resources>

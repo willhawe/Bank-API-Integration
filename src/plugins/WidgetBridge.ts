@@ -2,6 +2,9 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 
 export interface WidgetBridgePlugin {
   setSpentToday(options: { amount: string }): Promise<void>;
+  setCategoryBreakdown(options: {
+    categories: { category: string; amountCents: number }[];
+  }): Promise<void>;
   openNotificationAccessSettings(): Promise<void>;
   getNotificationAccessStatus(): Promise<{ enabled: boolean }>;
   getNotificationSummary(): Promise<NativeNotificationSummary>;
@@ -43,6 +46,17 @@ export async function syncWidgetTotal(amount: string): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   try {
     await WidgetBridge.setSpentToday({ amount });
+  } catch {
+    // widget sync is best-effort
+  }
+}
+
+export async function syncCategoryBreakdown(
+  categories: { category: string; amountCents: number }[],
+): Promise<void> {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    await WidgetBridge.setCategoryBreakdown({ categories });
   } catch {
     // widget sync is best-effort
   }
