@@ -26,6 +26,9 @@ export interface ScannedPayment {
   category: string | null;
   deleted: boolean;
   deletedAt: string | null;
+  // Only populated on payments read back from Supabase; the native store
+  // and file imports never carry a photo.
+  photoUrl?: string | null;
 }
 
 export interface NotificationSummary {

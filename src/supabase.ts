@@ -100,7 +100,7 @@ export async function getPaymentsForPeriod(
   const [transactionsResult, statementResult] = await Promise.all([
     supabase
       .from("transactions")
-      .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
+      .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at, photo_url")
       .eq("deleted", false)
       .gte("payment_date", startStr)
       .lt("payment_date", endStr)
@@ -125,6 +125,7 @@ export async function getPaymentsForPeriod(
     category: typeof row.category === "string" && row.category.trim() ? row.category : null,
     deleted: row.deleted === true,
     deletedAt: row.deleted_at ?? null,
+    photoUrl: typeof row.photo_url === "string" && row.photo_url ? row.photo_url : null,
   }));
 
   const totals = new Map<string, number>();

@@ -634,16 +634,28 @@ export default function App() {
                   </li>
                 )}
                 <li className="last-alert__row">
-                  <div className="last-alert__merchant">
-                    <span>{payment.merchant}</span>
-                    <span className={`payment-category payment-category--${categoryClassName(category)}`}>
-                      {category}
-                    </span>
-                    {orphanedIds.has(payment.id) && (
-                      <span className="payment-orphan-flag" title="No matching statement transaction found">
-                        No statement match
-                      </span>
+                  <div className="last-alert__lead">
+                    {payment.photoUrl && (
+                      <button
+                        type="button"
+                        className="payment-photo-thumb"
+                        aria-label={`View photo for ${payment.merchant}`}
+                        onClick={() => window.open(payment.photoUrl as string, "_blank", "noopener,noreferrer")}
+                      >
+                        <img src={payment.photoUrl} alt="" loading="lazy" />
+                      </button>
                     )}
+                    <div className="last-alert__merchant">
+                      <span>{payment.merchant}</span>
+                      <span className={`payment-category payment-category--${categoryClassName(category)}`}>
+                        {category}
+                      </span>
+                      {orphanedIds.has(payment.id) && (
+                        <span className="payment-orphan-flag" title="No matching statement transaction found">
+                          No statement match
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <strong>{payment.amount}</strong>
                   <div className="payment-actions">
