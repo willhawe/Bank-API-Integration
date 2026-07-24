@@ -21,6 +21,7 @@ import {
   getPaymentsForPeriod,
   updatePaymentCategory,
   saveReceiptImage,
+  uploadReceiptPhoto,
   addReceiptItem,
   removeReceiptItem,
   importStatementTransactions,
@@ -32,8 +33,10 @@ import {
   type CategoryRange,
   type CategoryTotal,
   type StatementTransaction,
+  type ReceiptItem,
 } from "./supabase";
 import { captureReceiptPhoto } from "./receipt";
+import { extractReceiptItems } from "./ocr";
 import {
   CATEGORIES,
   categoryClassName,
@@ -266,14 +269,41 @@ export default function App() {
         setBreakdownMessage("No photo captured.");
         return;
       }
-      const ok = await saveReceiptImage(id, image);
-      setBreakdownMessage(ok ? "Receipt saved." : "Could not save receipt.");
-      if (ok) {
-        setBreakdowns((prev) => ({
-          ...prev,
-          [id]: { items: prev[id]?.items ?? [], receiptImage: image },
-        }));
+
+      const uploadedUrl = await uploadReceiptPhoto(id, image);
+      const saved = uploadedUrl ? await saveReceiptImage(id, uploadedUrl) : false;
+      if (!saved || !uploadedUrl) {
+        setBreakdownMessage("Could not save receipt photo.");
+        return;
       }
+
+      setBreakdowns((prev) => ({
+        ...prev,
+        [id]: { items: prev[id]?.items ?? [], receiptImage: uploadedUrl },
+      }));
+      setBreakdownMessage("Receipt saved. Reading items...");
+
+      const extracted = await extractReceiptItems(image);
+      if (extracted.length === 0) {
+        setBreakdownMessage("Receipt saved. No items detected — add them manually below.");
+        return;
+      }
+
+      const added: ReceiptItem[] = [];
+      for (const item of extracted) {
+        const saved = await addReceiptItem(id, item.name, item.priceCents);
+        if (saved) added.push(saved);
+      }
+
+      setBreakdowns((prev) => ({
+        ...prev,
+        [id]: { receiptImage: uploadedUrl, items: [...(prev[id]?.items ?? []), ...added] },
+      }));
+      setBreakdownMessage(
+        added.length > 0
+          ? `Receipt saved. Added ${added.length} item${added.length === 1 ? "" : "s"} — review and edit below.`
+          : "Receipt saved. Could not read items — add them manually below.",
+      );
     } finally {
       setScanBusyId(null);
     }

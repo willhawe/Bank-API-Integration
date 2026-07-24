@@ -399,6 +399,27 @@ export async function saveReceiptImage(id: string, image: string): Promise<boole
   return !error;
 }
 
+const RECEIPTS_BUCKET = "receipts";
+
+export async function uploadReceiptPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+  if (!supabase) return null;
+
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+  const contentType = match?.[1] ?? "image/jpeg";
+  const extension = contentType.split("/")[1] ?? "jpg";
+  const path = `${transactionId}/${Date.now()}.${extension}`;
+
+  const blob = await (await fetch(dataUrl)).blob();
+  const { error } = await supabase.storage.from(RECEIPTS_BUCKET).upload(path, blob, {
+    contentType,
+    upsert: true,
+  });
+  if (error) return null;
+
+  const { data } = supabase.storage.from(RECEIPTS_BUCKET).getPublicUrl(path);
+  return data.publicUrl ?? null;
+}
+
 export async function addReceiptItem(
   transactionId: string,
   name: string,
