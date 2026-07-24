@@ -20,6 +20,8 @@ import {
   getMonthlyCategoryTotals,
   getPaymentsForPeriod,
   updatePaymentCategory,
+  getOtherPaymentsFromMerchant,
+  setCategoryForIds,
   markPaymentDeleted,
   saveReceiptImage,
   uploadReceiptPhoto,
@@ -75,6 +77,12 @@ export default function App() {
   const [linkingStatementId, setLinkingStatementId] = useState<string | null>(null);
   const [linkCandidates, setLinkCandidates] = useState<ScannedPayment[]>([]);
   const [linkMessage, setLinkMessage] = useState("");
+  const [bulkPrompt, setBulkPrompt] = useState<{
+    merchant: string;
+    category: string;
+    payments: ScannedPayment[];
+  } | null>(null);
+  const [bulkMessage, setBulkMessage] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -222,7 +230,7 @@ export default function App() {
     await refreshSummary();
   }
 
-  async function chooseCategory(id: string, category: string) {
+  async function chooseCategory(id: string, category: string, merchant?: string) {
     // Best-effort: keeps the native widget's cache in sync, but this silently
     // no-ops if the payment already rolled out of the native today-cache
     // (or was added via manual entry/import), so it must never be relied on
@@ -239,9 +247,37 @@ export default function App() {
     }
     setOpenPaymentMenuId(null);
     await refreshSummary();
+
+    if (ok && merchant) {
+      const others = await getOtherPaymentsFromMerchant(merchant, id, category);
+      if (others.length > 0) {
+        setBulkMessage("");
+        setBulkPrompt({ merchant, category, payments: others });
+      }
+    }
   }
 
-  async function addCategory(id: string) {
+  async function applyBulkCategory() {
+    if (!bulkPrompt) return;
+    const ids = bulkPrompt.payments.map((payment) => payment.id);
+    const ok = await setCategoryForIds(ids, bulkPrompt.category);
+    if (!ok) {
+      setBulkMessage("Could not update those transactions.");
+      return;
+    }
+    // Best-effort native-cache sync for any of them still in today's cache.
+    try {
+      for (const paymentId of ids) {
+        await setPaymentCategory(paymentId, bulkPrompt.category);
+      }
+    } catch {
+      // native store unavailable — Supabase is the source of truth
+    }
+    setBulkPrompt(null);
+    await refreshSummary();
+  }
+
+  async function addCategory(id: string, merchant: string) {
     const name = categoryDraft.trim();
     if (!name) return;
 
@@ -255,7 +291,7 @@ export default function App() {
     }
 
     setCategoryDraft("");
-    await chooseCategory(id, name);
+    await chooseCategory(id, name, merchant);
   }
 
   function togglePaymentMenu(id: string) {
@@ -287,9 +323,13 @@ export default function App() {
       }
 
       const uploadedUrl = await uploadReceiptPhoto(id, image);
-      const saved = uploadedUrl ? await saveReceiptImage(id, uploadedUrl) : false;
-      if (!saved || !uploadedUrl) {
-        setBreakdownMessage("Could not save receipt photo.");
+      if (!uploadedUrl) {
+        setBreakdownMessage("Upload failed — has the 'receipts' bucket been created? (migration 20260724b)");
+        return;
+      }
+      const saved = await saveReceiptImage(id, uploadedUrl);
+      if (!saved) {
+        setBreakdownMessage("Uploaded, but saving the link failed.");
         return;
       }
 
@@ -340,9 +380,13 @@ export default function App() {
       }
 
       const uploadedUrl = await uploadMomentPhoto(id, image);
-      const saved = uploadedUrl ? await savePhoto(id, uploadedUrl) : false;
-      if (!saved || !uploadedUrl) {
-        setMomentMessage("Could not save photo.");
+      if (!uploadedUrl) {
+        setMomentMessage("Upload failed — has the 'moments' bucket been created? (migration 20260724c)");
+        return;
+      }
+      const saved = await savePhoto(id, uploadedUrl);
+      if (!saved) {
+        setMomentMessage("Uploaded, but saving the link failed — does transactions.photo_url exist? (migration 20260724c)");
         return;
       }
 
@@ -647,7 +691,7 @@ export default function App() {
                                     ? "payment-menu__category payment-menu__category--active"
                                     : "payment-menu__category"
                                 }
-                                onClick={() => void chooseCategory(payment.id, option)}
+                                onClick={() => void chooseCategory(payment.id, option, payment.merchant)}
                               >
                                 {option}
                               </button>
@@ -660,7 +704,7 @@ export default function App() {
                               placeholder="New category"
                               inputMode="text"
                             />
-                            <button type="button" onClick={() => void addCategory(payment.id)}>
+                            <button type="button" onClick={() => void addCategory(payment.id, payment.merchant)}>
                               Add
                             </button>
                           </div>
@@ -864,6 +908,64 @@ export default function App() {
                 <p className="last-alert__empty">No unlinked notification transactions to match.</p>
               )}
               {linkMessage && <p className="manual-entry__message">{linkMessage}</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {bulkPrompt && (
+        <div className="payment-menu-overlay">
+          <div className="payment-menu-backdrop" onClick={() => setBulkPrompt(null)} />
+          <div
+            className="payment-menu"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Categorise all ${bulkPrompt.merchant} transactions`}
+          >
+            <button type="button" className="payment-menu__handle" aria-label="Close" onClick={() => setBulkPrompt(null)} />
+            <div className="payment-menu__sheet-header">
+              <div className="payment-menu__sheet-title">
+                <span>Categorise all {bulkPrompt.merchant}?</span>
+                <strong>
+                  Apply “{bulkPrompt.category}” to {bulkPrompt.payments.length} more transaction
+                  {bulkPrompt.payments.length === 1 ? "" : "s"}
+                </strong>
+              </div>
+              <button
+                type="button"
+                className="payment-menu__close"
+                aria-label="Close menu"
+                onClick={() => setBulkPrompt(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="payment-menu__body">
+              <ul className="payment-list">
+                {bulkPrompt.payments.map((payment) => {
+                  const current = payment.category ?? inferCategory(payment.merchant);
+                  return (
+                    <li key={payment.id} className="last-alert__row">
+                      <div className="last-alert__merchant">
+                        <span>{payment.paymentDate}</span>
+                        <span className={`payment-category payment-category--${categoryClassName(current)}`}>
+                          {current}
+                        </span>
+                      </div>
+                      <strong>{payment.amount}</strong>
+                    </li>
+                  );
+                })}
+              </ul>
+              {bulkMessage && <p className="manual-entry__message">{bulkMessage}</p>}
+            </div>
+            <div className="payment-menu__footer">
+              <button type="button" className="link-statement-btn" onClick={() => setBulkPrompt(null)}>
+                Just that one
+              </button>
+              <button type="button" className="bulk-apply-btn" onClick={() => void applyBulkCategory()}>
+                Apply to all
+              </button>
             </div>
           </div>
         </div>

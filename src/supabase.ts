@@ -401,6 +401,50 @@ export async function saveReceiptImage(id: string, image: string): Promise<boole
   return !error;
 }
 
+export async function getOtherPaymentsFromMerchant(
+  merchant: string,
+  excludeId: string,
+  excludeCategory: string,
+): Promise<ScannedPayment[]> {
+  if (!supabase || !merchant.trim()) return [];
+
+  // ilike with escaped pattern chars = case-insensitive exact match.
+  const pattern = merchant.replace(/[\\%_]/g, (char) => `\\${char}`);
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
+    .eq("deleted", false)
+    .ilike("merchant", pattern)
+    .neq("id", excludeId)
+    .order("payment_date", { ascending: false });
+
+  if (error || !data) return [];
+
+  return data
+    .map((row) => ({
+      id: row.id,
+      merchant: row.merchant ?? "",
+      amount: row.amount_display ?? formatGbpCents(row.amount_cents ?? 0),
+      amountCents: row.amount_cents ?? 0,
+      paymentDate: row.payment_date ?? "",
+      source: row.source ?? "notification",
+      category: typeof row.category === "string" && row.category.trim() ? row.category : null,
+      deleted: row.deleted === true,
+      deletedAt: row.deleted_at ?? null,
+    }))
+    .filter((payment) => (payment.category ?? "") !== excludeCategory);
+}
+
+export async function setCategoryForIds(ids: string[], category: string): Promise<boolean> {
+  if (!supabase || ids.length === 0) return false;
+  const trimmed = category.trim();
+  const { error } = await supabase
+    .from("transactions")
+    .update({ category: trimmed.length > 0 ? trimmed : null, updated_at: new Date().toISOString() })
+    .in("id", ids);
+  return !error;
+}
+
 export async function markPaymentDeleted(id: string): Promise<boolean> {
   if (!supabase) return false;
   const now = new Date().toISOString();
