@@ -359,6 +359,7 @@ export interface ReceiptItem {
 
 export interface TransactionBreakdown {
   receiptImage: string | null;
+  photoUrl: string | null;
   items: ReceiptItem[];
 }
 
@@ -366,7 +367,7 @@ export async function getTransactionBreakdown(id: string): Promise<TransactionBr
   if (!supabase) return null;
 
   const [transactionResult, itemsResult] = await Promise.all([
-    supabase.from("transactions").select("receipt_image").eq("id", id).maybeSingle(),
+    supabase.from("transactions").select("receipt_image, photo_url").eq("id", id).maybeSingle(),
     supabase
       .from("transaction_items")
       .select("id, name, price_cents")
@@ -379,6 +380,7 @@ export async function getTransactionBreakdown(id: string): Promise<TransactionBr
   return {
     receiptImage:
       typeof transactionResult.data?.receipt_image === "string" ? transactionResult.data.receipt_image : null,
+    photoUrl: typeof transactionResult.data?.photo_url === "string" ? transactionResult.data.photo_url : null,
     items: parseItems(itemsResult.data),
   };
 }
@@ -399,9 +401,16 @@ export async function saveReceiptImage(id: string, image: string): Promise<boole
   return !error;
 }
 
-const RECEIPTS_BUCKET = "receipts";
+export async function savePhoto(id: string, url: string): Promise<boolean> {
+  if (!supabase) return false;
+  const { error } = await supabase.from("transactions").update({ photo_url: url }).eq("id", id);
+  return !error;
+}
 
-export async function uploadReceiptPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+const RECEIPTS_BUCKET = "receipts";
+const MOMENTS_BUCKET = "moments";
+
+async function uploadPhotoToBucket(bucket: string, transactionId: string, dataUrl: string): Promise<string | null> {
   if (!supabase) return null;
 
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
@@ -410,14 +419,22 @@ export async function uploadReceiptPhoto(transactionId: string, dataUrl: string)
   const path = `${transactionId}/${Date.now()}.${extension}`;
 
   const blob = await (await fetch(dataUrl)).blob();
-  const { error } = await supabase.storage.from(RECEIPTS_BUCKET).upload(path, blob, {
+  const { error } = await supabase.storage.from(bucket).upload(path, blob, {
     contentType,
     upsert: true,
   });
   if (error) return null;
 
-  const { data } = supabase.storage.from(RECEIPTS_BUCKET).getPublicUrl(path);
+  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
   return data.publicUrl ?? null;
+}
+
+export async function uploadReceiptPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+  return uploadPhotoToBucket(RECEIPTS_BUCKET, transactionId, dataUrl);
+}
+
+export async function uploadMomentPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+  return uploadPhotoToBucket(MOMENTS_BUCKET, transactionId, dataUrl);
 }
 
 export async function addReceiptItem(

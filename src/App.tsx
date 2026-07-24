@@ -22,6 +22,8 @@ import {
   updatePaymentCategory,
   saveReceiptImage,
   uploadReceiptPhoto,
+  savePhoto,
+  uploadMomentPhoto,
   addReceiptItem,
   removeReceiptItem,
   importStatementTransactions,
@@ -55,6 +57,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [breakdowns, setBreakdowns] = useState<Record<string, TransactionBreakdown>>({});
   const [scanBusyId, setScanBusyId] = useState<string | null>(null);
+  const [momentBusyId, setMomentBusyId] = useState<string | null>(null);
+  const [momentMessage, setMomentMessage] = useState("");
   const [itemDraftName, setItemDraftName] = useState("");
   const [itemDraftPrice, setItemDraftPrice] = useState("");
   const [breakdownMessage, setBreakdownMessage] = useState("");
@@ -249,6 +253,7 @@ export default function App() {
     setItemDraftName("");
     setItemDraftPrice("");
     setBreakdownMessage("");
+    setMomentMessage("");
     setCategoryDraft("");
     if (opening && !breakdowns[id]) {
       void loadBreakdown(id);
@@ -279,7 +284,7 @@ export default function App() {
 
       setBreakdowns((prev) => ({
         ...prev,
-        [id]: { items: prev[id]?.items ?? [], receiptImage: uploadedUrl },
+        [id]: { items: prev[id]?.items ?? [], receiptImage: uploadedUrl, photoUrl: prev[id]?.photoUrl ?? null },
       }));
       setBreakdownMessage("Receipt saved. Reading items...");
 
@@ -297,7 +302,11 @@ export default function App() {
 
       setBreakdowns((prev) => ({
         ...prev,
-        [id]: { receiptImage: uploadedUrl, items: [...(prev[id]?.items ?? []), ...added] },
+        [id]: {
+          receiptImage: uploadedUrl,
+          photoUrl: prev[id]?.photoUrl ?? null,
+          items: [...(prev[id]?.items ?? []), ...added],
+        },
       }));
       setBreakdownMessage(
         added.length > 0
@@ -306,6 +315,37 @@ export default function App() {
       );
     } finally {
       setScanBusyId(null);
+    }
+  }
+
+  async function takePhoto(id: string) {
+    setMomentBusyId(id);
+    setMomentMessage("");
+    try {
+      const image = await captureReceiptPhoto();
+      if (!image) {
+        setMomentMessage("No photo captured.");
+        return;
+      }
+
+      const uploadedUrl = await uploadMomentPhoto(id, image);
+      const saved = uploadedUrl ? await savePhoto(id, uploadedUrl) : false;
+      if (!saved || !uploadedUrl) {
+        setMomentMessage("Could not save photo.");
+        return;
+      }
+
+      setBreakdowns((prev) => ({
+        ...prev,
+        [id]: {
+          items: prev[id]?.items ?? [],
+          receiptImage: prev[id]?.receiptImage ?? null,
+          photoUrl: uploadedUrl,
+        },
+      }));
+      setMomentMessage("Photo saved.");
+    } finally {
+      setMomentBusyId(null);
     }
   }
 
@@ -323,6 +363,7 @@ export default function App() {
         ...prev,
         [id]: {
           receiptImage: prev[id]?.receiptImage ?? null,
+          photoUrl: prev[id]?.photoUrl ?? null,
           items: [...(prev[id]?.items ?? []), item],
         },
       }));
@@ -341,6 +382,7 @@ export default function App() {
         ...prev,
         [id]: {
           receiptImage: prev[id]?.receiptImage ?? null,
+          photoUrl: prev[id]?.photoUrl ?? null,
           items: (prev[id]?.items ?? []).filter((item) => item.id !== itemId),
         },
       }));
@@ -680,6 +722,38 @@ export default function App() {
                                 </button>
                               </div>
                               {breakdownMessage && <p className="manual-entry__message">{breakdownMessage}</p>}
+                            </div>
+                          )}
+                          {isSupabaseConfigured() && (
+                            <div className="payment-menu__section">
+                              <p className="payment-menu__label">Photo</p>
+                              <div className="receipt-scan-row">
+                                {breakdown?.photoUrl && (
+                                  <button
+                                    type="button"
+                                    className="receipt-thumb"
+                                    aria-label={`View photo for ${payment.merchant}`}
+                                    onClick={() =>
+                                      window.open(breakdown.photoUrl as string, "_blank", "noopener,noreferrer")
+                                    }
+                                  >
+                                    <img src={breakdown.photoUrl} alt="" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="scan-receipt-btn"
+                                  disabled={momentBusyId === payment.id}
+                                  onClick={() => void takePhoto(payment.id)}
+                                >
+                                  {momentBusyId === payment.id
+                                    ? "Saving..."
+                                    : breakdown?.photoUrl
+                                      ? "Retake photo"
+                                      : "Take photo"}
+                                </button>
+                              </div>
+                              {momentMessage && <p className="manual-entry__message">{momentMessage}</p>}
                             </div>
                           )}
                         </div>
