@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Settings } from "lucide-react";
 import { NotificationScanner } from "./components/NotificationScanner";
-import { parsePaymentFile } from "./importPayments";
+import { parseStatementFile } from "./importPayments";
 import {
   addManualPayment,
   canUseNotificationAccess,
@@ -19,13 +19,19 @@ import {
   getTransactionBreakdown,
   getMonthlyCategoryTotals,
   getPaymentsForPeriod,
+  updatePaymentCategory,
   saveReceiptImage,
   addReceiptItem,
   removeReceiptItem,
+  importStatementTransactions,
+  getUnmatchedStatementRows,
+  getOrphanTransactionCandidates,
+  linkStatementTransaction,
   type SyncStatus,
   type TransactionBreakdown,
   type CategoryRange,
   type CategoryTotal,
+  type StatementTransaction,
 } from "./supabase";
 import { captureReceiptPhoto } from "./receipt";
 import {
@@ -56,6 +62,11 @@ export default function App() {
   const [periodPayments, setPeriodPayments] = useState<ScannedPayment[]>([]);
   const [periodTotals, setPeriodTotals] = useState<CategoryTotal[]>([]);
   const [periodTotalCents, setPeriodTotalCents] = useState(0);
+  const [orphanedIds, setOrphanedIds] = useState<Set<string>>(new Set());
+  const [unmatchedStatementRows, setUnmatchedStatementRows] = useState<StatementTransaction[]>([]);
+  const [linkingStatementId, setLinkingStatementId] = useState<string | null>(null);
+  const [linkCandidates, setLinkCandidates] = useState<ScannedPayment[]>([]);
+  const [linkMessage, setLinkMessage] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +77,7 @@ export default function App() {
       setSyncStatus(await syncPayments(next.payments));
       await syncMonthlyCategoryWidget();
       await loadPeriodData();
+      await loadUnmatchedStatementRows();
     }
 
     void refresh();
@@ -94,6 +106,11 @@ export default function App() {
     setPeriodPayments(result.payments);
     setPeriodTotals(result.totals);
     setPeriodTotalCents(result.totalCents);
+    setOrphanedIds(new Set(result.orphanedIds));
+  }
+
+  async function loadUnmatchedStatementRows() {
+    setUnmatchedStatementRows(await getUnmatchedStatementRows());
   }
 
   async function refreshSummary() {
@@ -125,24 +142,49 @@ export default function App() {
     if (!file) return;
     setImportMessage("Reading file...");
     try {
-      const payments = await parsePaymentFile(file);
-      if (payments.length === 0) {
-        setImportMessage("No payments found.");
+      const statement = await parseStatementFile(file);
+      if (statement.rows.length === 0) {
+        setImportMessage("No transactions found.");
         return;
       }
-      const status = await syncPayments(payments);
-      setSyncStatus(status);
-      await syncMonthlyCategoryWidget();
+      if (!isSupabaseConfigured()) {
+        setImportMessage("Statement parsed, but Supabase is not configured in this build.");
+        return;
+      }
+      const result = await importStatementTransactions(statement.rows, statement.source, file.name);
       setImportMessage(
-        status === "synced"
-          ? `Imported ${payments.length} payment${payments.length === 1 ? "" : "s"}.`
-          : status === "error"
-            ? "Import parsed, but Supabase sync failed."
-            : "Import parsed, but Supabase is not configured in this build.",
+        `Imported ${result.inserted} transaction${result.inserted === 1 ? "" : "s"} — ` +
+          `${result.matched} matched to notifications` +
+          (result.unmatched > 0 ? `, ${result.unmatched} need manual linking.` : "."),
       );
+      await loadUnmatchedStatementRows();
+      await loadPeriodData();
     } catch (error) {
       setImportMessage(error instanceof Error ? error.message : "Could not import file.");
     }
+  }
+
+  async function startLinking(statementId: string, statementRow: StatementTransaction) {
+    setLinkingStatementId(statementId);
+    setLinkMessage("");
+    setLinkCandidates(await getOrphanTransactionCandidates(statementRow));
+  }
+
+  function cancelLinking() {
+    setLinkingStatementId(null);
+    setLinkCandidates([]);
+    setLinkMessage("");
+  }
+
+  async function confirmLink(statementId: string, transactionId: string) {
+    const ok = await linkStatementTransaction(statementId, transactionId);
+    if (!ok) {
+      setLinkMessage("Could not link transaction.");
+      return;
+    }
+    cancelLinking();
+    await loadUnmatchedStatementRows();
+    await loadPeriodData();
   }
 
   async function openScannerSettings() {
@@ -163,10 +205,19 @@ export default function App() {
   }
 
   async function chooseCategory(id: string, category: string) {
+    // Best-effort: keeps the native widget's cache in sync, but this silently
+    // no-ops if the payment already rolled out of the native today-cache
+    // (or was added via manual entry/import), so it must never be relied on
+    // as the source of truth — Supabase is updated directly below instead.
     try {
       await setPaymentCategory(id, category);
-    } catch (error) {
-      setFormMessage(error instanceof Error ? error.message : "Could not set category.");
+    } catch {
+      // native store unavailable (e.g. web build) — ignore, Supabase update still applies
+    }
+
+    const ok = await updatePaymentCategory(id, category);
+    if (!ok) {
+      setFormMessage("Could not set category.");
     }
     setOpenPaymentMenuId(null);
     await refreshSummary();
@@ -451,6 +502,11 @@ export default function App() {
                     <span className={`payment-category payment-category--${categoryClassName(category)}`}>
                       {category}
                     </span>
+                    {orphanedIds.has(payment.id) && (
+                      <span className="payment-orphan-flag" title="No matching statement transaction found">
+                        No statement match
+                      </span>
+                    )}
                   </div>
                   <strong>{payment.amount}</strong>
                   <div className="payment-actions">
@@ -629,6 +685,74 @@ export default function App() {
           <p className="last-alert__empty">No payments in this period.</p>
         )}
       </section>
+
+      {unmatchedStatementRows.length > 0 && (
+        <section className="unmatched-statement">
+          <div className="last-alert__header">
+            <p className="last-alert__label">Unmatched statement items</p>
+          </div>
+          <ul className="payment-list">
+            {unmatchedStatementRows.map((row) => (
+              <li key={row.id} className="last-alert__row">
+                <div className="last-alert__merchant">
+                  <span>{row.merchant}</span>
+                  <span className="payment-category">{row.source}</span>
+                </div>
+                <strong>{row.amount}</strong>
+                <div className="payment-actions">
+                  <button type="button" className="link-statement-btn" onClick={() => void startLinking(row.id, row)}>
+                    Link
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {linkingStatementId && (
+        <div className="payment-menu-overlay">
+          <div className="payment-menu-backdrop" onClick={cancelLinking} />
+          <div className="payment-menu" role="dialog" aria-modal="true" aria-label="Link statement transaction">
+            <button type="button" className="payment-menu__handle" aria-label="Close" onClick={cancelLinking} />
+            <div className="payment-menu__sheet-header">
+              <div className="payment-menu__sheet-title">
+                <span>Pick the matching transaction</span>
+              </div>
+              <button type="button" className="payment-menu__close" aria-label="Close menu" onClick={cancelLinking}>
+                ×
+              </button>
+            </div>
+            <div className="payment-menu__body">
+              {linkCandidates.length > 0 ? (
+                <ul className="payment-list">
+                  {linkCandidates.map((candidate) => (
+                    <li key={candidate.id} className="last-alert__row">
+                      <div className="last-alert__merchant">
+                        <span>{candidate.merchant}</span>
+                        <span className="payment-category">{candidate.paymentDate}</span>
+                      </div>
+                      <strong>{candidate.amount}</strong>
+                      <div className="payment-actions">
+                        <button
+                          type="button"
+                          className="link-statement-btn"
+                          onClick={() => void confirmLink(linkingStatementId, candidate.id)}
+                        >
+                          Select
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="last-alert__empty">No unlinked notification transactions to match.</p>
+              )}
+              {linkMessage && <p className="manual-entry__message">{linkMessage}</p>}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

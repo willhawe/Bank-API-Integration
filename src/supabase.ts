@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import type { ScannedPayment } from "./plugins/WidgetBridge";
 import { inferCategory } from "./categories";
+import { formatGbp, slug, type ParsedRow, type StatementSource } from "./importPayments";
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined;
@@ -83,27 +84,36 @@ export interface PeriodPaymentsResult {
   payments: ScannedPayment[];
   totals: CategoryTotal[];
   totalCents: number;
+  orphanedIds: string[];
 }
 
 export async function getPaymentsForPeriod(
   range: CategoryRange,
   referenceDate: Date,
 ): Promise<PeriodPaymentsResult> {
-  if (!supabase) return { payments: [], totals: [], totalCents: 0 };
+  if (!supabase) return { payments: [], totals: [], totalCents: 0, orphanedIds: [] };
 
   const { start, end } = periodBounds(range, referenceDate);
   const startStr = start.toISOString().slice(0, 10);
   const endStr = end.toISOString().slice(0, 10);
 
-  const { data, error } = await supabase
-    .from("transactions")
-    .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
-    .eq("deleted", false)
-    .gte("payment_date", startStr)
-    .lt("payment_date", endStr)
-    .order("payment_date", { ascending: false });
+  const [transactionsResult, statementResult] = await Promise.all([
+    supabase
+      .from("transactions")
+      .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
+      .eq("deleted", false)
+      .gte("payment_date", startStr)
+      .lt("payment_date", endStr)
+      .order("payment_date", { ascending: false }),
+    supabase
+      .from("statement_transactions")
+      .select("matched_transaction_id")
+      .gte("transaction_date", startStr)
+      .lt("transaction_date", endStr),
+  ]);
 
-  if (error || !data) return { payments: [], totals: [], totalCents: 0 };
+  const { data, error } = transactionsResult;
+  if (error || !data) return { payments: [], totals: [], totalCents: 0, orphanedIds: [] };
 
   const payments: ScannedPayment[] = data.map((row) => ({
     id: row.id,
@@ -125,12 +135,26 @@ export async function getPaymentsForPeriod(
     totalCents += payment.amountCents;
   }
 
+  // A statement covering this period has been uploaded if any statement row
+  // falls within it — only then is it meaningful to flag notification
+  // payments in the same period that no statement row matched.
+  const hasStatementCoverage = !statementResult.error && (statementResult.data?.length ?? 0) > 0;
+  const matchedIds = new Set(
+    (statementResult.data ?? [])
+      .map((row) => row.matched_transaction_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+  const orphanedIds = hasStatementCoverage
+    ? payments.filter((payment) => payment.source === "notification" && !matchedIds.has(payment.id)).map((p) => p.id)
+    : [];
+
   return {
     payments,
     totals: [...totals.entries()]
       .map(([category, amountCents]) => ({ category, amountCents }))
       .sort((a, b) => b.amountCents - a.amountCents),
     totalCents,
+    orphanedIds,
   };
 }
 
@@ -141,6 +165,190 @@ function formatGbpCents(cents: number): string {
 export async function getMonthlyCategoryTotals(): Promise<CategoryTotal[]> {
   const { totals } = await getPaymentsForPeriod("month", new Date());
   return totals;
+}
+
+export interface StatementTransaction {
+  id: string;
+  source: StatementSource;
+  merchant: string;
+  amount: string;
+  amountCents: number;
+  transactionDate: string;
+  fileName: string | null;
+  matchedTransactionId: string | null;
+}
+
+export interface ImportStatementResult {
+  inserted: number;
+  matched: number;
+  unmatched: number;
+}
+
+const MATCH_WINDOW_DAYS = 5;
+
+function addDays(dateStr: string, days: number): string {
+  const date = new Date(`${dateStr}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetween(a: string, b: string): number {
+  const diffMs = new Date(`${a}T00:00:00Z`).getTime() - new Date(`${b}T00:00:00Z`).getTime();
+  return Math.abs(Math.round(diffMs / 86_400_000));
+}
+
+async function findMatchCandidate(
+  row: ParsedRow,
+  alreadyLinkedIds: Set<string>,
+): Promise<string | null> {
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("id, payment_date")
+    .eq("deleted", false)
+    .eq("amount_cents", row.amountCents)
+    .gte("payment_date", addDays(row.paymentDate, -MATCH_WINDOW_DAYS))
+    .lte("payment_date", addDays(row.paymentDate, MATCH_WINDOW_DAYS));
+
+  if (error || !data) return null;
+
+  const candidates = data.filter((candidate) => !alreadyLinkedIds.has(candidate.id));
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0]?.id ?? null;
+
+  const sorted = [...candidates].sort(
+    (a, b) => daysBetween(a.payment_date, row.paymentDate) - daysBetween(b.payment_date, row.paymentDate),
+  );
+  const [best, second] = sorted;
+  if (!best || !second) return best?.id ?? null;
+
+  // Ambiguous (two equally-close candidates with the same amount) — leave
+  // unmatched so the user picks the right one instead of guessing.
+  if (daysBetween(best.payment_date, row.paymentDate) < daysBetween(second.payment_date, row.paymentDate)) {
+    return best.id;
+  }
+  return null;
+}
+
+export async function importStatementTransactions(
+  rows: ParsedRow[],
+  source: StatementSource,
+  fileName: string,
+): Promise<ImportStatementResult> {
+  if (!supabase || rows.length === 0) return { inserted: 0, matched: 0, unmatched: 0 };
+
+  const { data: alreadyLinked } = await supabase
+    .from("statement_transactions")
+    .select("matched_transaction_id")
+    .not("matched_transaction_id", "is", null);
+  const linkedIds = new Set(
+    (alreadyLinked ?? [])
+      .map((r) => r.matched_transaction_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  let matched = 0;
+  const insertRows = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!row) continue;
+
+    const matchId = await findMatchCandidate(row, linkedIds);
+    if (matchId) {
+      linkedIds.add(matchId);
+      matched += 1;
+    }
+
+    insertRows.push({
+      id: `stmt|${source}|${row.paymentDate}|${slug(row.merchant)}|${row.amountCents}|${slug(fileName)}|${index}`,
+      source,
+      merchant: row.merchant,
+      amount_cents: row.amountCents,
+      amount_display: formatGbp(row.amountCents),
+      transaction_date: row.paymentDate,
+      file_name: fileName,
+      matched_transaction_id: matchId,
+    });
+  }
+
+  const { error } = await supabase.from("statement_transactions").upsert(insertRows, { onConflict: "id" });
+  if (error) return { inserted: 0, matched: 0, unmatched: 0 };
+
+  return { inserted: insertRows.length, matched, unmatched: insertRows.length - matched };
+}
+
+export async function getUnmatchedStatementRows(): Promise<StatementTransaction[]> {
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("statement_transactions")
+    .select("id, source, merchant, amount_cents, amount_display, transaction_date, file_name, matched_transaction_id")
+    .is("matched_transaction_id", null)
+    .order("transaction_date", { ascending: false });
+
+  if (error || !data) return [];
+
+  return data.map((row) => ({
+    id: row.id,
+    source: (row.source ?? "csv") as StatementSource,
+    merchant: row.merchant ?? "",
+    amount: row.amount_display ?? formatGbpCents(row.amount_cents ?? 0),
+    amountCents: row.amount_cents ?? 0,
+    transactionDate: row.transaction_date ?? "",
+    fileName: row.file_name ?? null,
+    matchedTransactionId: row.matched_transaction_id ?? null,
+  }));
+}
+
+export async function getOrphanTransactionCandidates(statementRow: StatementTransaction): Promise<ScannedPayment[]> {
+  if (!supabase) return [];
+
+  const [linkedResult, transactionsResult] = await Promise.all([
+    supabase.from("statement_transactions").select("matched_transaction_id").not("matched_transaction_id", "is", null),
+    supabase
+      .from("transactions")
+      .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
+      .eq("deleted", false)
+      .eq("source", "notification"),
+  ]);
+
+  if (transactionsResult.error || !transactionsResult.data) return [];
+
+  const linkedIds = new Set(
+    (linkedResult.data ?? [])
+      .map((row) => row.matched_transaction_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  return transactionsResult.data
+    .filter((row) => !linkedIds.has(row.id))
+    .map((row) => ({
+      id: row.id,
+      merchant: row.merchant ?? "",
+      amount: row.amount_display ?? formatGbpCents(row.amount_cents ?? 0),
+      amountCents: row.amount_cents ?? 0,
+      paymentDate: row.payment_date ?? "",
+      source: row.source ?? "notification",
+      category: typeof row.category === "string" && row.category.trim() ? row.category : null,
+      deleted: row.deleted === true,
+      deletedAt: row.deleted_at ?? null,
+    }))
+    .sort(
+      (a, b) =>
+        daysBetween(a.paymentDate, statementRow.transactionDate) -
+        daysBetween(b.paymentDate, statementRow.transactionDate),
+    )
+    .slice(0, 25);
+}
+
+export async function linkStatementTransaction(statementId: string, transactionId: string): Promise<boolean> {
+  if (!supabase) return false;
+  const { error } = await supabase
+    .from("statement_transactions")
+    .update({ matched_transaction_id: transactionId })
+    .eq("id", statementId);
+  return !error;
 }
 
 export interface ReceiptItem {
@@ -173,6 +381,16 @@ export async function getTransactionBreakdown(id: string): Promise<TransactionBr
       typeof transactionResult.data?.receipt_image === "string" ? transactionResult.data.receipt_image : null,
     items: parseItems(itemsResult.data),
   };
+}
+
+export async function updatePaymentCategory(id: string, category: string): Promise<boolean> {
+  if (!supabase) return false;
+  const trimmed = category.trim();
+  const { error } = await supabase
+    .from("transactions")
+    .update({ category: trimmed.length > 0 ? trimmed : null, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  return !error;
 }
 
 export async function saveReceiptImage(id: string, image: string): Promise<boolean> {

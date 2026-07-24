@@ -1,23 +1,29 @@
 import * as pdfjs from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
-import type { ScannedPayment } from "./plugins/WidgetBridge";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
-interface ParsedRow {
+export interface ParsedRow {
   merchant: string;
   amountCents: number;
   paymentDate: string;
 }
 
-export async function parsePaymentFile(file: File): Promise<ScannedPayment[]> {
+export type StatementSource = "chase" | "amex" | "csv";
+
+export interface ParsedStatement {
+  source: StatementSource;
+  rows: ParsedRow[];
+}
+
+export async function parseStatementFile(file: File): Promise<ParsedStatement> {
   const name = file.name.toLowerCase();
-  if (name.endsWith(".csv")) return parseCsv(await file.text(), file.name);
-  if (name.endsWith(".pdf")) return parsePdf(file, file.name);
+  if (name.endsWith(".csv")) return { source: "csv", rows: parseCsv(await file.text()) };
+  if (name.endsWith(".pdf")) return parsePdf(file);
   throw new Error("Upload a CSV or PDF file.");
 }
 
-async function parsePdf(file: File, fileName: string): Promise<ScannedPayment[]> {
+async function parsePdf(file: File): Promise<ParsedStatement> {
   const data = new Uint8Array(await file.arrayBuffer());
   const doc = await pdfjs.getDocument({ data }).promise;
   const lines: string[] = [];
@@ -34,12 +40,12 @@ async function parsePdf(file: File, fileName: string): Promise<ScannedPayment[]>
   }
 
   const chaseRows = parseChaseStatement(pageTexts);
-  if (chaseRows.length > 0) return rowsToPayments(chaseRows, fileName);
+  if (chaseRows.length > 0) return { source: "chase", rows: chaseRows };
 
   const amexRows = parseAmexStatement(pageTexts);
-  if (amexRows.length > 0) return rowsToPayments(amexRows, fileName);
+  if (amexRows.length > 0) return { source: "amex", rows: amexRows };
 
-  return rowsToPayments(lines.flatMap(parseLooseTextLine), fileName);
+  return { source: "csv", rows: lines.flatMap(parseLooseTextLine) };
 }
 
 function parseChaseStatement(pageTexts: string[]): ParsedRow[] {
@@ -109,7 +115,7 @@ function parseAmexStatement(pageTexts: string[]): ParsedRow[] {
   });
 }
 
-function parseCsv(text: string, fileName: string): ScannedPayment[] {
+function parseCsv(text: string): ParsedRow[] {
   const rows = splitCsv(text);
   if (rows.length < 2) return [];
 
@@ -119,18 +125,16 @@ function parseCsv(text: string, fileName: string): ScannedPayment[] {
   const amountIndex = findHeader(headers, ["amount", "value", "debit", "paid out", "out"]);
 
   if (dateIndex < 0 || merchantIndex < 0 || amountIndex < 0) {
-    return rowsToPayments(rows.flatMap((row) => parseLooseTextLine(row.join(" "))), fileName);
+    return rows.flatMap((row) => parseLooseTextLine(row.join(" ")));
   }
 
-  const parsed = rows.slice(1).flatMap((row): ParsedRow[] => {
+  return rows.slice(1).flatMap((row): ParsedRow[] => {
     const merchant = row[merchantIndex]?.trim() ?? "";
     const date = parseDate(row[dateIndex] ?? "");
     const amountCents = parseAmountCents(row[amountIndex] ?? "");
     if (!merchant || !date || amountCents <= 0) return [];
     return [{ merchant, paymentDate: date, amountCents }];
   });
-
-  return rowsToPayments(parsed, fileName);
 }
 
 function parseLooseTextLine(line: string): ParsedRow[] {
@@ -154,20 +158,6 @@ function parseLooseTextLine(line: string): ParsedRow[] {
 
   if (!merchant || merchant.length < 2) return [];
   return [{ merchant, paymentDate: date, amountCents }];
-}
-
-function rowsToPayments(rows: ParsedRow[], fileName: string): ScannedPayment[] {
-  return rows.map((row, index) => ({
-    id: `import|${row.paymentDate}|${slug(row.merchant)}|${row.amountCents}|${slug(fileName)}|${index}`,
-    merchant: row.merchant,
-    amount: formatGbp(row.amountCents),
-    amountCents: row.amountCents,
-    paymentDate: row.paymentDate,
-    source: "import",
-    category: null,
-    deleted: false,
-    deletedAt: null,
-  }));
 }
 
 function splitCsv(text: string): string[][] {
@@ -266,13 +256,13 @@ function parseAmountCents(value: string): number {
   return Number(pounds) * 100 + Number(pence.padEnd(2, "0"));
 }
 
-function formatGbp(amountCents: number): string {
+export function formatGbp(amountCents: number): string {
   return new Intl.NumberFormat("en-GB", {
     style: "currency",
     currency: "GBP",
   }).format(amountCents / 100);
 }
 
-function slug(value: string): string {
+export function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
 }

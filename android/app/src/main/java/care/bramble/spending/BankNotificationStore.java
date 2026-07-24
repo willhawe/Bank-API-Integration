@@ -245,16 +245,7 @@ public final class BankNotificationStore {
 
     private static boolean looksLikeBankNotification(String packageName, String appLabel, String combined) {
         String haystack = join(packageName, appLabel, combined).toLowerCase(Locale.UK);
-        boolean bankApp = haystack.contains("chase")
-                || haystack.contains("jpmorgan")
-                || haystack.contains("jp morgan")
-                || haystack.contains("american express")
-                || haystack.contains("amex");
-        boolean walletCard = haystack.contains("google wallet")
-                && (haystack.contains("american express")
-                || haystack.contains("amex")
-                || haystack.contains("chase"));
-        return bankApp || walletCard;
+        return haystack.contains("google wallet");
     }
 
     private static boolean looksLikeSpend(String combined) {
