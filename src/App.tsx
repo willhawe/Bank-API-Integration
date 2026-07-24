@@ -20,6 +20,7 @@ import {
   getMonthlyCategoryTotals,
   getPaymentsForPeriod,
   updatePaymentCategory,
+  markPaymentDeleted,
   saveReceiptImage,
   uploadReceiptPhoto,
   savePhoto,
@@ -206,7 +207,17 @@ export default function App() {
   }
 
   async function removePayment(id: string) {
-    await deletePayment(id);
+    // Best-effort native-cache delete (keeps today's widget total right);
+    // silently no-ops off-device or once the payment has left the daily
+    // cache, so Supabase below is the source of truth — mirrors chooseCategory.
+    try {
+      await deletePayment(id);
+    } catch {
+      // native store unavailable (e.g. web build)
+    }
+
+    const ok = await markPaymentDeleted(id);
+    if (!ok) setFormMessage("Could not delete payment.");
     setOpenPaymentMenuId(null);
     await refreshSummary();
   }

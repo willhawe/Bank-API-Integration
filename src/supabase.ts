@@ -401,6 +401,16 @@ export async function saveReceiptImage(id: string, image: string): Promise<boole
   return !error;
 }
 
+export async function markPaymentDeleted(id: string): Promise<boolean> {
+  if (!supabase) return false;
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("transactions")
+    .update({ deleted: true, deleted_at: now, updated_at: now })
+    .eq("id", id);
+  return !error;
+}
+
 export async function savePhoto(id: string, url: string): Promise<boolean> {
   if (!supabase) return false;
   const { error } = await supabase.from("transactions").update({ photo_url: url }).eq("id", id);
