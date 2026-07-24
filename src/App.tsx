@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Settings } from "lucide-react";
 import { NotificationScanner } from "./components/NotificationScanner";
 import { parseStatementFile } from "./importPayments";
@@ -615,7 +615,10 @@ export default function App() {
           <ul className="payment-list">
             {(() => {
               const allCategories = [...CATEGORIES.slice(0, -1), ...customCategories, "Other"];
-              return periodPayments.map((payment) => {
+              return periodPayments.map((payment, index) => {
+              const showDateDivider =
+                periodRange !== "day" &&
+                (index === 0 || periodPayments[index - 1]?.paymentDate !== payment.paymentDate);
               const menuOpen = openPaymentMenuId === payment.id;
               const category = payment.category ?? inferCategory(payment.merchant);
               const rowUrl = getSupabaseRowUrl(payment.id);
@@ -624,7 +627,13 @@ export default function App() {
               const itemsTotalCents = items.reduce((total, item) => total + item.priceCents, 0);
 
               return (
-                <li key={payment.id} className="last-alert__row">
+                <Fragment key={payment.id}>
+                {showDateDivider && (
+                  <li className="payment-date-divider">
+                    <span>{dateDividerLabel(payment.paymentDate, periodRange)}</span>
+                  </li>
+                )}
+                <li className="last-alert__row">
                   <div className="last-alert__merchant">
                     <span>{payment.merchant}</span>
                     <span className={`payment-category payment-category--${categoryClassName(category)}`}>
@@ -837,6 +846,7 @@ export default function App() {
                     </div>
                   )}
                 </li>
+                </Fragment>
               );
               });
             })()}
@@ -1005,6 +1015,19 @@ function parseMonthInputValue(value: string): Date | null {
   const match = /^(\d{4})-(\d{2})$/.exec(value);
   if (!match) return null;
   return new Date(Number(match[1]), Number(match[2]) - 1, 1);
+}
+
+function dateDividerLabel(dateStr: string, range: CategoryRange): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return dateStr;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  // Month view repeats within one month, so weekday+day is unambiguous;
+  // year view spans months, so include the month.
+  return date.toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    ...(range === "year" ? { month: "short" } : {}),
+  });
 }
 
 function periodLabel(range: CategoryRange, date: Date): string {

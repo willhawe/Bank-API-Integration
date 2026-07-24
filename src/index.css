@@ -448,6 +448,34 @@ button {
   font-size: 1rem;
 }
 
+.payment-date-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.payment-date-divider:first-child {
+  margin-top: 0;
+}
+
+.payment-date-divider span {
+  font-size: 0.6875rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  text-transform: lowercase;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.payment-date-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 .last-alert__row span {
   min-width: 0;
   overflow-wrap: anywhere;
