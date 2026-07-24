@@ -11,7 +11,6 @@ import {
   setPaymentCategory,
   syncCategoryBreakdown,
   type ScannedPayment,
-  type NotificationSummary,
 } from "./plugins/WidgetBridge";
 import {
   syncPayments,
@@ -19,11 +18,14 @@ import {
   isSupabaseConfigured,
   getTransactionBreakdown,
   getMonthlyCategoryTotals,
+  getPaymentsForPeriod,
   saveReceiptImage,
   addReceiptItem,
   removeReceiptItem,
   type SyncStatus,
   type TransactionBreakdown,
+  type CategoryRange,
+  type CategoryTotal,
 } from "./supabase";
 import { captureReceiptPhoto } from "./receipt";
 import {
@@ -35,12 +37,6 @@ import {
 } from "./categories";
 
 export default function App() {
-  const [summary, setSummary] = useState<NotificationSummary>({
-    spentToday: "£0.00",
-    lastMerchant: "",
-    lastAmount: "",
-    payments: [],
-  });
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("not-configured");
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
@@ -55,6 +51,11 @@ export default function App() {
   const [breakdownMessage, setBreakdownMessage] = useState("");
   const [customCategories, setCustomCategories] = useState<string[]>(() => loadCustomCategories());
   const [categoryDraft, setCategoryDraft] = useState("");
+  const [periodRange, setPeriodRange] = useState<CategoryRange>("month");
+  const [periodDate, setPeriodDate] = useState(() => new Date());
+  const [periodPayments, setPeriodPayments] = useState<ScannedPayment[]>([]);
+  const [periodTotals, setPeriodTotals] = useState<CategoryTotal[]>([]);
+  const [periodTotalCents, setPeriodTotalCents] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,8 +63,9 @@ export default function App() {
     async function refresh() {
       const next = await getNotificationSummary();
       if (cancelled) return;
-      setSummary(next);
       setSyncStatus(await syncPayments(next.payments));
+      await syncMonthlyCategoryWidget();
+      await loadPeriodData();
     }
 
     void refresh();
@@ -73,11 +75,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
-
-  useEffect(() => {
-    void syncMonthlyCategoryWidget();
-  }, []);
+  }, [periodRange, periodDate]);
 
   useEffect(() => {
     document.body.style.overflow = openPaymentMenuId ? "hidden" : "";
@@ -91,11 +89,18 @@ export default function App() {
     await syncCategoryBreakdown(totals);
   }
 
+  async function loadPeriodData() {
+    const result = await getPaymentsForPeriod(periodRange, periodDate);
+    setPeriodPayments(result.payments);
+    setPeriodTotals(result.totals);
+    setPeriodTotalCents(result.totalCents);
+  }
+
   async function refreshSummary() {
     const next = await getNotificationSummary();
-    setSummary(next);
     setSyncStatus(await syncPayments(next.payments));
     await syncMonthlyCategoryWidget();
+    await loadPeriodData();
   }
 
   async function addPayment() {
@@ -261,14 +266,17 @@ export default function App() {
     }
   }
 
-  const activePayments = summary.payments.filter((payment) => !payment.deleted);
-  const categoryTotals = getCategoryTotals(activePayments);
+  const maxCategoryAmount = Math.max(0, ...periodTotals.map((item) => item.amountCents));
+  const categoryTotals = periodTotals.map((item) => ({
+    ...item,
+    percent: maxCategoryAmount > 0 ? Math.max(6, Math.round((item.amountCents / maxCategoryAmount) * 100)) : 0,
+  }));
 
   return (
     <main className="app app--scanner">
       <section className="scanner-total">
         <div className="scanner-total__top">
-          <p className="scanner-total__label">Spent today</p>
+          <p className="scanner-total__label">Spent</p>
           <div className="settings-shell">
             <button
               type="button"
@@ -291,6 +299,27 @@ export default function App() {
                   Notification scanner settings
                 </button>
                 <div className="settings-menu__section">
+                  <p className="settings-menu__label">Add missed payment</p>
+                  <div className="settings-menu__fields">
+                    <input
+                      value={merchant}
+                      onChange={(event) => setMerchant(event.target.value)}
+                      placeholder="Merchant"
+                      inputMode="text"
+                    />
+                    <input
+                      value={amount}
+                      onChange={(event) => setAmount(event.target.value)}
+                      placeholder="Amount"
+                      inputMode="decimal"
+                    />
+                    <button type="button" onClick={() => void addPayment()}>
+                      Add
+                    </button>
+                  </div>
+                  {formMessage && <p className="manual-entry__message">{formMessage}</p>}
+                </div>
+                <div className="settings-menu__section">
                   <p className="settings-menu__label">Import payments</p>
                   <label className="file-picker">
                     <input
@@ -306,8 +335,62 @@ export default function App() {
             )}
           </div>
         </div>
-        <p className="scanner-total__amount">{summary.spentToday}</p>
-        <p className="scanner-total__hint">From payment notifications on this phone</p>
+
+        <div className="period-filter">
+          <div className="period-filter__tabs">
+            {(["day", "month", "year"] as const).map((range) => (
+              <button
+                key={range}
+                type="button"
+                className={
+                  periodRange === range
+                    ? "period-filter__tab period-filter__tab--active"
+                    : "period-filter__tab"
+                }
+                onClick={() => setPeriodRange(range)}
+              >
+                {range === "day" ? "Day" : range === "month" ? "Month" : "Year"}
+              </button>
+            ))}
+          </div>
+          {periodRange === "day" && (
+            <input
+              type="date"
+              className="period-filter__input"
+              value={toDateInputValue(periodDate)}
+              onChange={(event) => {
+                const parsed = parseDateInputValue(event.target.value);
+                if (parsed) setPeriodDate(parsed);
+              }}
+            />
+          )}
+          {periodRange === "month" && (
+            <input
+              type="month"
+              className="period-filter__input"
+              value={toMonthInputValue(periodDate)}
+              onChange={(event) => {
+                const parsed = parseMonthInputValue(event.target.value);
+                if (parsed) setPeriodDate(parsed);
+              }}
+            />
+          )}
+          {periodRange === "year" && (
+            <input
+              type="number"
+              className="period-filter__input"
+              value={periodDate.getFullYear()}
+              onChange={(event) => {
+                const year = Number(event.target.value);
+                if (!Number.isFinite(year)) return;
+                setPeriodDate((prev) => new Date(year, prev.getMonth(), 1));
+              }}
+            />
+          )}
+        </div>
+
+        <p className="scanner-total__amount">{formatGbp(periodTotalCents)}</p>
+        <p className="scanner-total__hint">{periodLabel(periodRange, periodDate)}</p>
         <p className={`sync-status sync-status--${syncStatus}`}>
           {syncStatus === "synced"
             ? "Synced to Supabase"
@@ -319,8 +402,7 @@ export default function App() {
 
       <section className="category-chart">
         <div className="category-chart__header">
-          <p className="category-chart__label">By category</p>
-          <span>{activePayments.length} payments</span>
+          <span>{periodPayments.length} payments</span>
         </div>
         {categoryTotals.length > 0 ? (
           <ul className="category-chart__list">
@@ -346,37 +428,15 @@ export default function App() {
 
       <NotificationScanner />
 
-      <section className="manual-entry">
-        <p className="manual-entry__label">Add missed payment</p>
-        <div className="manual-entry__fields">
-          <input
-            value={merchant}
-            onChange={(event) => setMerchant(event.target.value)}
-            placeholder="Merchant"
-            inputMode="text"
-          />
-          <input
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            placeholder="Amount"
-            inputMode="decimal"
-          />
-          <button type="button" onClick={() => void addPayment()}>
-            Add
-          </button>
-        </div>
-        {formMessage && <p className="manual-entry__message">{formMessage}</p>}
-      </section>
-
       <section className="last-alert">
         <div className="last-alert__header">
-          <p className="last-alert__label">Counted today</p>
+          <p className="last-alert__label">Payments</p>
         </div>
-        {activePayments.length > 0 ? (
+        {periodPayments.length > 0 ? (
           <ul className="payment-list">
             {(() => {
               const allCategories = [...CATEGORIES.slice(0, -1), ...customCategories, "Other"];
-              return activePayments.map((payment, index) => {
+              return periodPayments.map((payment) => {
               const menuOpen = openPaymentMenuId === payment.id;
               const category = payment.category ?? inferCategory(payment.merchant);
               const rowUrl = getSupabaseRowUrl(payment.id);
@@ -385,7 +445,7 @@ export default function App() {
               const itemsTotalCents = items.reduce((total, item) => total + item.priceCents, 0);
 
               return (
-                <li key={`${payment.merchant}-${payment.amount}-${index}`} className="last-alert__row">
+                <li key={payment.id} className="last-alert__row">
                   <div className="last-alert__merchant">
                     <span>{payment.merchant}</span>
                     <span className={`payment-category payment-category--${categoryClassName(category)}`}>
@@ -566,7 +626,7 @@ export default function App() {
             })()}
           </ul>
         ) : (
-          <p className="last-alert__empty">No payment notifications scanned today.</p>
+          <p className="last-alert__empty">No payments in this period.</p>
         )}
       </section>
     </main>
@@ -580,21 +640,39 @@ function parseAmountCents(value: string): number {
   return Number(pounds) * 100 + Number(pence.padEnd(2, "0"));
 }
 
-function getCategoryTotals(payments: ScannedPayment[]) {
-  const totals = new Map<string, number>();
-  for (const payment of payments) {
-    const category = payment.category ?? inferCategory(payment.merchant);
-    totals.set(category, (totals.get(category) ?? 0) + payment.amountCents);
-  }
+function toDateInputValue(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
-  const maxAmount = Math.max(0, ...totals.values());
-  return [...totals.entries()]
-    .map(([category, amountCents]) => ({
-      category,
-      amountCents,
-      percent: maxAmount > 0 ? Math.max(6, Math.round((amountCents / maxAmount) * 100)) : 0,
-    }))
-    .sort((a, b) => b.amountCents - a.amountCents);
+function toMonthInputValue(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+function parseDateInputValue(value: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function parseMonthInputValue(value: string): Date | null {
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, 1);
+}
+
+function periodLabel(range: CategoryRange, date: Date): string {
+  if (range === "day") {
+    return date.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+  }
+  if (range === "year") {
+    return String(date.getFullYear());
+  }
+  return date.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 }
 
 function formatGbp(cents: number): string {

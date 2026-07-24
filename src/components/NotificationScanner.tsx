@@ -27,16 +27,14 @@ export function NotificationScanner() {
     };
   }, [native]);
 
+  if (native && enabled) return null;
+
   return (
-    <div className={enabled ? "scanner scanner--enabled" : "scanner"}>
+    <div className="scanner">
       <div>
         <p className="scanner__label">Notification scanner</p>
         <p className="scanner__status">
-          {native
-            ? enabled
-              ? "Listening for Wallet card alerts"
-              : "Needs Android notification access"
-            : "Available in the Android app"}
+          {native ? "Needs Android notification access" : "Available in the Android app"}
         </p>
       </div>
     </div>

@@ -60,29 +60,87 @@ export interface CategoryTotal {
   amountCents: number;
 }
 
-export async function getMonthlyCategoryTotals(): Promise<CategoryTotal[]> {
-  if (!supabase) return [];
+export type CategoryRange = "day" | "month" | "year";
 
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+export function periodBounds(range: CategoryRange, ref: Date): { start: Date; end: Date } {
+  if (range === "day") {
+    const start = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start, end };
+  }
+  if (range === "year") {
+    const start = new Date(ref.getFullYear(), 0, 1);
+    const end = new Date(ref.getFullYear() + 1, 0, 1);
+    return { start, end };
+  }
+  const start = new Date(ref.getFullYear(), ref.getMonth(), 1);
+  const end = new Date(ref.getFullYear(), ref.getMonth() + 1, 1);
+  return { start, end };
+}
+
+export interface PeriodPaymentsResult {
+  payments: ScannedPayment[];
+  totals: CategoryTotal[];
+  totalCents: number;
+}
+
+export async function getPaymentsForPeriod(
+  range: CategoryRange,
+  referenceDate: Date,
+): Promise<PeriodPaymentsResult> {
+  if (!supabase) return { payments: [], totals: [], totalCents: 0 };
+
+  const { start, end } = periodBounds(range, referenceDate);
+  const startStr = start.toISOString().slice(0, 10);
+  const endStr = end.toISOString().slice(0, 10);
 
   const { data, error } = await supabase
     .from("transactions")
-    .select("category, amount_cents, merchant")
+    .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at")
     .eq("deleted", false)
-    .gte("payment_date", monthStart);
+    .gte("payment_date", startStr)
+    .lt("payment_date", endStr)
+    .order("payment_date", { ascending: false });
 
-  if (error || !data) return [];
+  if (error || !data) return { payments: [], totals: [], totalCents: 0 };
+
+  const payments: ScannedPayment[] = data.map((row) => ({
+    id: row.id,
+    merchant: row.merchant ?? "",
+    amount: row.amount_display ?? formatGbpCents(row.amount_cents ?? 0),
+    amountCents: row.amount_cents ?? 0,
+    paymentDate: row.payment_date ?? "",
+    source: row.source ?? "notification",
+    category: typeof row.category === "string" && row.category.trim() ? row.category : null,
+    deleted: row.deleted === true,
+    deletedAt: row.deleted_at ?? null,
+  }));
 
   const totals = new Map<string, number>();
-  for (const row of data) {
-    const category = row.category ?? inferCategory(row.merchant ?? "");
-    totals.set(category, (totals.get(category) ?? 0) + row.amount_cents);
+  let totalCents = 0;
+  for (const payment of payments) {
+    const category = payment.category ?? inferCategory(payment.merchant);
+    totals.set(category, (totals.get(category) ?? 0) + payment.amountCents);
+    totalCents += payment.amountCents;
   }
 
-  return [...totals.entries()]
-    .map(([category, amountCents]) => ({ category, amountCents }))
-    .sort((a, b) => b.amountCents - a.amountCents);
+  return {
+    payments,
+    totals: [...totals.entries()]
+      .map(([category, amountCents]) => ({ category, amountCents }))
+      .sort((a, b) => b.amountCents - a.amountCents),
+    totalCents,
+  };
+}
+
+function formatGbpCents(cents: number): string {
+  return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(cents / 100);
+}
+
+export async function getMonthlyCategoryTotals(): Promise<CategoryTotal[]> {
+  const { totals } = await getPaymentsForPeriod("month", new Date());
+  return totals;
 }
 
 export interface ReceiptItem {

@@ -323,13 +323,15 @@ button {
   letter-spacing: 0.06em;
 }
 
-.manual-entry__fields {
+.manual-entry__fields,
+.settings-menu__fields {
   display: grid;
   grid-template-columns: 1fr 6rem auto;
   gap: 0.5rem;
 }
 
-.manual-entry input {
+.manual-entry input,
+.settings-menu__fields input {
   min-width: 0;
   min-height: 44px;
   border: 1px solid var(--border);
@@ -340,11 +342,13 @@ button {
   font-size: 0.9375rem;
 }
 
-.manual-entry input::placeholder {
+.manual-entry input::placeholder,
+.settings-menu__fields input::placeholder {
   color: var(--text-muted);
 }
 
-.manual-entry button {
+.manual-entry button,
+.settings-menu__fields button {
   min-height: 44px;
   border: none;
   border-radius: 8px;
@@ -352,6 +356,49 @@ button {
   color: #fff;
   padding: 0 0.9rem;
   font-weight: 700;
+}
+
+.period-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.85rem;
+  flex-wrap: wrap;
+}
+
+.period-filter__tabs {
+  display: flex;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem;
+  background: var(--surface-raised);
+}
+
+.period-filter__tab {
+  min-height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 650;
+}
+
+.period-filter__tab--active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.period-filter__input {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  padding: 0 0.6rem;
+  font-size: 0.875rem;
 }
 
 .file-picker {
