@@ -464,30 +464,45 @@ export async function savePhoto(id: string, url: string): Promise<boolean> {
 const RECEIPTS_BUCKET = "receipts";
 const MOMENTS_BUCKET = "moments";
 
-async function uploadPhotoToBucket(bucket: string, transactionId: string, dataUrl: string): Promise<string | null> {
-  if (!supabase) return null;
+export interface UploadResult {
+  url: string | null;
+  error: string | null;
+}
+
+async function uploadPhotoToBucket(bucket: string, transactionId: string, dataUrl: string): Promise<UploadResult> {
+  if (!supabase) return { url: null, error: "Supabase is not configured in this build." };
 
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
   const contentType = match?.[1] ?? "image/jpeg";
   const extension = contentType.split("/")[1] ?? "jpg";
-  const path = `${transactionId}/${Date.now()}.${extension}`;
+  // Transaction ids contain characters storage keys reject (notification
+  // ids look like "2026-07-24|merchant name|1205"), so slug the folder.
+  const folder = slug(transactionId) || "txn";
+  const path = `${folder}/${Date.now()}.${extension}`;
 
-  const blob = await (await fetch(dataUrl)).blob();
+  let blob: Blob;
+  try {
+    blob = await (await fetch(dataUrl)).blob();
+  } catch (error) {
+    return { url: null, error: error instanceof Error ? error.message : "Could not read photo data." };
+  }
+
   const { error } = await supabase.storage.from(bucket).upload(path, blob, {
     contentType,
     upsert: true,
   });
-  if (error) return null;
+  if (error) return { url: null, error: error.message };
 
   const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-  return data.publicUrl ?? null;
+  if (!data.publicUrl) return { url: null, error: "Could not resolve public URL." };
+  return { url: data.publicUrl, error: null };
 }
 
-export async function uploadReceiptPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+export async function uploadReceiptPhoto(transactionId: string, dataUrl: string): Promise<UploadResult> {
   return uploadPhotoToBucket(RECEIPTS_BUCKET, transactionId, dataUrl);
 }
 
-export async function uploadMomentPhoto(transactionId: string, dataUrl: string): Promise<string | null> {
+export async function uploadMomentPhoto(transactionId: string, dataUrl: string): Promise<UploadResult> {
   return uploadPhotoToBucket(MOMENTS_BUCKET, transactionId, dataUrl);
 }
 

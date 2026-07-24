@@ -322,12 +322,13 @@ export default function App() {
         return;
       }
 
-      const uploadedUrl = await uploadReceiptPhoto(id, image);
-      if (!uploadedUrl) {
-        setBreakdownMessage("Upload failed — has the 'receipts' bucket been created? (migration 20260724b)");
+      const upload = await uploadReceiptPhoto(id, image);
+      if (!upload.url) {
+        setBreakdownMessage(`Upload failed: ${upload.error ?? "unknown error"}`);
         return;
       }
-      const saved = await saveReceiptImage(id, uploadedUrl);
+      const receiptUrl = upload.url;
+      const saved = await saveReceiptImage(id, receiptUrl);
       if (!saved) {
         setBreakdownMessage("Uploaded, but saving the link failed.");
         return;
@@ -335,7 +336,7 @@ export default function App() {
 
       setBreakdowns((prev) => ({
         ...prev,
-        [id]: { items: prev[id]?.items ?? [], receiptImage: uploadedUrl, photoUrl: prev[id]?.photoUrl ?? null },
+        [id]: { items: prev[id]?.items ?? [], receiptImage: receiptUrl, photoUrl: prev[id]?.photoUrl ?? null },
       }));
       setBreakdownMessage("Receipt saved. Reading items...");
 
@@ -354,7 +355,7 @@ export default function App() {
       setBreakdowns((prev) => ({
         ...prev,
         [id]: {
-          receiptImage: uploadedUrl,
+          receiptImage: receiptUrl,
           photoUrl: prev[id]?.photoUrl ?? null,
           items: [...(prev[id]?.items ?? []), ...added],
         },
@@ -379,12 +380,12 @@ export default function App() {
         return;
       }
 
-      const uploadedUrl = await uploadMomentPhoto(id, image);
-      if (!uploadedUrl) {
-        setMomentMessage("Upload failed — has the 'moments' bucket been created? (migration 20260724c)");
+      const upload = await uploadMomentPhoto(id, image);
+      if (!upload.url) {
+        setMomentMessage(`Upload failed: ${upload.error ?? "unknown error"}`);
         return;
       }
-      const saved = await savePhoto(id, uploadedUrl);
+      const saved = await savePhoto(id, upload.url);
       if (!saved) {
         setMomentMessage("Uploaded, but saving the link failed — does transactions.photo_url exist? (migration 20260724c)");
         return;
@@ -395,7 +396,7 @@ export default function App() {
         [id]: {
           items: prev[id]?.items ?? [],
           receiptImage: prev[id]?.receiptImage ?? null,
-          photoUrl: uploadedUrl,
+          photoUrl: upload.url,
         },
       }));
       setMomentMessage("Photo saved.");
