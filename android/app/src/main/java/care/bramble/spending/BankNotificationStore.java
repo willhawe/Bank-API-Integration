@@ -244,8 +244,19 @@ public final class BankNotificationStore {
     }
 
     private static boolean looksLikeBankNotification(String packageName, String appLabel, String combined) {
-        String haystack = join(packageName, appLabel, combined).toLowerCase(Locale.UK);
-        return haystack.contains("google wallet");
+        // Real Google Wallet notifications don't say "google wallet" anywhere —
+        // the label is just "Wallet" and the text is e.g. "£12.90 with Chase
+        // Debit Mastercard ••7614" — so match the app itself, not the text.
+        String pkg = packageName == null ? "" : packageName.toLowerCase(Locale.UK);
+        String label = appLabel == null ? "" : appLabel.trim().toLowerCase(Locale.UK);
+        boolean walletApp = pkg.startsWith("com.google.") && pkg.contains("wallet");
+        boolean walletLabel = label.equals("wallet") || label.equals("google wallet");
+        boolean walletText = join(packageName, appLabel, combined).toLowerCase(Locale.UK).contains("google wallet");
+        return walletApp || walletLabel || walletText;
+    }
+
+    static boolean looksLikeBankNotificationForTest(String packageName, String appLabel, String combined) {
+        return looksLikeBankNotification(packageName, appLabel, combined);
     }
 
     private static boolean looksLikeSpend(String combined) {
