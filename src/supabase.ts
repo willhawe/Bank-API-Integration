@@ -104,7 +104,8 @@ export async function getPaymentsForPeriod(
       .eq("deleted", false)
       .gte("payment_date", startStr)
       .lt("payment_date", endStr)
-      .order("payment_date", { ascending: false }),
+      .order("payment_date", { ascending: false })
+      .order("created_at", { ascending: false }),
     supabase
       .from("statement_transactions")
       .select("matched_transaction_id")
