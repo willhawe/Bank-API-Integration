@@ -1,6 +1,45 @@
-# Personal Spending Tracker
+# Personal Spending Pipeline
 
-Android-first spending widget that updates from Google Wallet, Chase, and Amex-style payment notifications. There is no bank connection flow or backend integration.
+[![Build Android APK](https://github.com/willhawe/Bank-API-Integration/actions/workflows/build-apk.yml/badge.svg)](https://github.com/willhawe/Bank-API-Integration/actions/workflows/build-apk.yml)
+
+An Android + React app that turns three unstructured sources — payment notifications, bank statement exports, and photographed receipts — into a single reconciled, categorized transaction ledger with home-screen widgets. No bank API, OAuth grant, or third-party aggregator is used anywhere in the pipeline; every source is either generated on-device or manually exported by the user.
+
+## Pipeline
+
+```
+┌─────────────────────┐   ┌────────────────────────┐   ┌───────────────────┐
+│ Notification listener│   │ Statement upload       │   │ Receipt photo     │
+│ (Google Wallet, Chase,│   │ (Chase/Amex PDF, CSV)  │   │ (Capacitor Camera)│
+│  Amex payment alerts) │   │ src/importPayments.ts  │   │                   │
+└──────────┬───────────┘   └───────────┬────────────┘   └─────────┬─────────┘
+           │ real-time, on-device       │ per-issuer regex parsers │ OCR (tesseract.js)
+           ▼                            ▼                          ▼
+   SharedPreferences cache      Parsed statement rows      Extracted line items
+           │                            │                          │
+           └───────────────┬────────────┘                          │
+                            ▼                                      │
+                  Reconciliation: match statement rows to           │
+                  notification-derived transactions by              │
+                  merchant/amount/date; surface unmatched            │
+                  rows for manual linking (src/App.tsx)              │
+                            │                                       │
+                            ▼                                       ▼
+                 Supabase / Postgres (transactions, categories, transaction_items)
+                            │
+                            ▼
+        React app UI  +  two native Android AppWidgetProviders
+        (daily total, monthly category breakdown — hand-rendered
+         Canvas bar chart, since widgets can't host arbitrary views)
+```
+
+## What it does
+
+- **Notification scanner** — an Android `NotificationListenerService` parses Google Wallet, Chase, and Amex-style payment notifications locally on the phone as they arrive; no data leaves the device until it's synced to your own Supabase project.
+- **Statement import & reconciliation** — upload a Chase or Amex PDF statement (or a generic CSV); per-issuer parsers extract merchant/amount/date, then match each row against existing notification-derived transactions. Anything that doesn't match is queued for manual linking instead of silently duplicating.
+- **Receipt OCR** — photograph a receipt and `tesseract.js` (with a grayscale/contrast preprocessing pass) extracts line items, filtering out totals, tender lines, and self-checkout UI chrome, so you get itemized spend without manual entry.
+- **Category taxonomy** — Postgres-backed categories with per-category color and free-form sub-categories, including bulk re-categorization across a merchant's full history and a one-time migration path from an earlier localStorage-only version.
+- **Home-screen widgets** — a daily spend total and a monthly category breakdown, the latter a hand-drawn stacked bar chart rendered directly onto a `Canvas` bitmap in native Java (Android widgets can't host arbitrary views, so the chart is rasterized on every update).
+- **Soft delete, photo attachments, and Supabase deep-links** — every transaction can carry a receipt photo and a separate "moment" photo, deletions are soft (recoverable), and each row links straight to its Supabase table editor entry for debugging.
 
 ## Run locally
 
@@ -27,7 +66,7 @@ cd android
 JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ./gradlew :app:assembleDebug
 ```
 
-The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. CI (`.github/workflows/build-apk.yml`) builds the same debug APK on every push to `main` and uploads it as an artifact.
 
 ## Supabase sync
 
@@ -40,68 +79,30 @@ VITE_SUPABASE_PUBLISHABLE_KEY=your_publishable_key
 
 Only use the publishable/anon key in this app. Rebuild and reinstall the APK after changing env values.
 
-Soft-delete support needs these columns:
-
-```sql
-alter table public.transactions
-add column if not exists deleted boolean not null default false,
-add column if not exists deleted_at timestamptz;
-```
-
-Receipt scanning needs this column:
-
-```sql
-alter table public.transactions
-add column if not exists receipt_image text;
-```
-
-Manual line-item breakdown needs its own table:
-
-```sql
-create table if not exists public.transaction_items (
-  id bigint generated always as identity primary key,
-  transaction_id text not null references public.transactions(id) on delete cascade,
-  name text not null,
-  price_cents integer not null check (price_cents > 0),
-  created_at timestamptz not null default now()
-);
-
-create index if not exists transaction_items_transaction_id_idx
-  on public.transaction_items (transaction_id);
-```
-
-Make sure `transaction_items` has the same row-level security / grants as `transactions` so the app's publishable key can read and write it.
-
-## What you get in V1
-
-- **Android notification scanner** for Google Wallet, Chase, and Amex-style payment alerts
-- **Home-screen widget** showing today’s notification-derived spend total
-- **Minimal app screen** showing notification access status, today’s scanned total, and latest scanned payment
-- **No bank API code** and no server-side account connection flow
+Apply the SQL files under `supabase/migrations/` in order (Supabase SQL editor, or `supabase db push` if you've linked the CLI) to get the current schema: soft-delete columns, receipt/photo columns, the `transaction_items` line-item table, the `categories` table, and the statement-import tables.
 
 ## Architecture
 
 ```
 src/
-├── App.tsx          # Scanner-only app screen
-├── components/      # Notification scanner control
-└── plugins/         # Capacitor bridge to native Android scanner state
+├── App.tsx            # Main screen: totals, category chart, payment list, settings
+├── importPayments.ts  # Chase/Amex PDF + CSV statement parsers
+├── ocr.ts              # Receipt OCR (tesseract.js) + image preprocessing
+├── receipt.ts           # Capacitor Camera capture
+├── categoriesApi.ts    # Category/sub-category CRUD against Supabase
+├── categories.ts       # Category inference + chart bar-segment helpers
+├── supabase.ts          # Supabase client + all transaction/statement queries
+├── components/          # Notification scanner control
+└── plugins/              # Capacitor bridge to native Android scanner/widget state
+
+android/app/src/main/java/care/bramble/spending/
+├── BankNotificationListener.java  # NotificationListenerService: parses payment alerts
+├── BankNotificationStore.java     # SharedPreferences-backed daily payment cache
+├── SpentTodayWidget.java           # Daily spend total widget
+├── MonthlyCategoryWidget.java      # Monthly category breakdown widget (Canvas chart)
+├── CategoryBreakdownStore.java     # Cache the React app syncs widget data into
+└── WidgetBridgePlugin.java          # Capacitor plugin bridging JS <-> native state
 ```
-
-### Notification scanner
-
-The Android app registers `BankNotificationListener`, an Android `NotificationListenerService`. When notification access is enabled, payment notifications are parsed locally on the phone and written to `SharedPreferences`; `SpentTodayWidget` reads the same storage and refreshes immediately.
-
-The parser currently handles Google Wallet notifications such as:
-
-```text
-LONDON NORTH EASTERN RAILWAY
-£12.05 with The American Express® Rewards Credit Card ••2002
-```
-
-### UI flow
-
-The React app only reads native scanner state through `WidgetBridge`: notification access status, today’s scanned total, and the latest scanned merchant/amount. It does not seed or render fake transactions.
 
 ## Tech stack
 
@@ -109,18 +110,19 @@ The React app only reads native scanner state through `WidgetBridge`: notificati
 |-------|--------|-----|
 | UI | React 19 + TypeScript | Fast to iterate, strong typing for domain model |
 | Build | Vite | Instant dev server, easy phone testing on LAN |
-| Storage | Android SharedPreferences | Local-only, no backend |
+| Native shell | Capacitor + Java | Notification listening and widgets need real Android APIs |
+| Storage | Supabase (Postgres) | Managed Postgres with row-level security, reachable from the client with only a publishable key |
+| Local cache | Android SharedPreferences | Instant widget refresh without a network round-trip |
+| OCR | tesseract.js | Client-side receipt text extraction, no server required |
+| Statement parsing | pdfjs-dist | Extract text layout from Chase/Amex PDF exports |
 | Styling | Plain CSS | Mobile-first, no extra dependencies |
-
-The Android shell is built with Capacitor and native Java classes for notification listening and widget updates.
 
 ## Next steps
 
-- Test real Google Wallet, Chase, and Amex notification wording on the Samsung phone.
-- Store parsed notification transactions, not only the daily total.
-- Show notification-derived transactions inside the app.
 - Add duplicate handling across Wallet and bank-app notifications for the same payment.
+- Broaden statement parsing beyond Chase/Amex PDF layouts.
+- Surface reconciliation confidence (exact vs. fuzzy match) in the linking UI.
 
 ## Licence
 
-Private / personal use.
+MIT — see [LICENSE](LICENSE).
