@@ -8,7 +8,7 @@ const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | un
 const supabaseProjectRef = supabaseUrl?.match(/^https:\/\/([^.]+)\.supabase\.co/)?.[1];
 const supabaseTransactionsTableId = import.meta.env.VITE_SUPABASE_TRANSACTIONS_TABLE_ID as string | undefined;
 
-const supabase =
+export const supabase =
   supabaseUrl && supabaseKey
     ? createClient(supabaseUrl, supabaseKey)
     : null;
@@ -36,6 +36,11 @@ export async function syncPayments(payments: ScannedPayment[]): Promise<SyncStat
   if (!supabase) return "not-configured";
   if (payments.length === 0) return "synced";
 
+  // subcategory (like photo_url/receipt_image below it) is intentionally left
+  // out of this upsert: `payments` here comes from the native today-cache,
+  // which never carries a subcategory, so including it would null out any
+  // subcategory a user just picked on the very next poll tick. Supabase is
+  // the sole source of truth for subcategory — see getPaymentsForPeriod.
   const rows = payments.map((payment) => ({
     id: payment.id,
     merchant: payment.merchant,
@@ -56,9 +61,15 @@ export async function syncPayments(payments: ScannedPayment[]): Promise<SyncStat
   return error ? "error" : "synced";
 }
 
+export interface SubcategoryTotal {
+  subcategory: string;
+  amountCents: number;
+}
+
 export interface CategoryTotal {
   category: string;
   amountCents: number;
+  subcategories: SubcategoryTotal[];
 }
 
 export type CategoryRange = "day" | "month" | "year";
@@ -100,7 +111,9 @@ export async function getPaymentsForPeriod(
   const [transactionsResult, statementResult] = await Promise.all([
     supabase
       .from("transactions")
-      .select("id, merchant, amount_display, amount_cents, payment_date, source, category, deleted, deleted_at, photo_url")
+      .select(
+        "id, merchant, amount_display, amount_cents, payment_date, source, category, subcategory, deleted, deleted_at, photo_url",
+      )
       .eq("deleted", false)
       .gte("payment_date", startStr)
       .lt("payment_date", endStr)
@@ -124,16 +137,22 @@ export async function getPaymentsForPeriod(
     paymentDate: row.payment_date ?? "",
     source: row.source ?? "notification",
     category: typeof row.category === "string" && row.category.trim() ? row.category : null,
+    subcategory: typeof row.subcategory === "string" && row.subcategory.trim() ? row.subcategory : null,
     deleted: row.deleted === true,
     deletedAt: row.deleted_at ?? null,
     photoUrl: typeof row.photo_url === "string" && row.photo_url ? row.photo_url : null,
   }));
 
-  const totals = new Map<string, number>();
+  const totals = new Map<string, { amountCents: number; subcategories: Map<string, number> }>();
   let totalCents = 0;
   for (const payment of payments) {
     const category = payment.category ?? inferCategory(payment.merchant);
-    totals.set(category, (totals.get(category) ?? 0) + payment.amountCents);
+    const bucket = totals.get(category) ?? { amountCents: 0, subcategories: new Map<string, number>() };
+    bucket.amountCents += payment.amountCents;
+    if (payment.subcategory) {
+      bucket.subcategories.set(payment.subcategory, (bucket.subcategories.get(payment.subcategory) ?? 0) + payment.amountCents);
+    }
+    totals.set(category, bucket);
     totalCents += payment.amountCents;
   }
 
@@ -153,7 +172,13 @@ export async function getPaymentsForPeriod(
   return {
     payments,
     totals: [...totals.entries()]
-      .map(([category, amountCents]) => ({ category, amountCents }))
+      .map(([category, bucket]) => ({
+        category,
+        amountCents: bucket.amountCents,
+        subcategories: [...bucket.subcategories.entries()]
+          .map(([subcategory, amountCents]) => ({ subcategory, amountCents }))
+          .sort((a, b) => b.amountCents - a.amountCents),
+      }))
       .sort((a, b) => b.amountCents - a.amountCents),
     totalCents,
     orphanedIds,
@@ -387,12 +412,31 @@ export async function getTransactionBreakdown(id: string): Promise<TransactionBr
   };
 }
 
-export async function updatePaymentCategory(id: string, category: string): Promise<boolean> {
+export async function updatePaymentCategory(
+  id: string,
+  category: string,
+  options?: { clearSubcategory?: boolean },
+): Promise<boolean> {
   if (!supabase) return false;
   const trimmed = category.trim();
+  const update: Record<string, unknown> = {
+    category: trimmed.length > 0 ? trimmed : null,
+    updated_at: new Date().toISOString(),
+  };
+  // Sub-categories are scoped to their parent category, so moving a
+  // transaction to a different category invalidates whatever sub-category it
+  // had (e.g. "Takeaway" under Food is meaningless once moved to Transport).
+  if (options?.clearSubcategory) update.subcategory = null;
+  const { error } = await supabase.from("transactions").update(update).eq("id", id);
+  return !error;
+}
+
+export async function updatePaymentSubcategory(id: string, subcategory: string): Promise<boolean> {
+  if (!supabase) return false;
+  const trimmed = subcategory.trim();
   const { error } = await supabase
     .from("transactions")
-    .update({ category: trimmed.length > 0 ? trimmed : null, updated_at: new Date().toISOString() })
+    .update({ subcategory: trimmed.length > 0 ? trimmed : null, updated_at: new Date().toISOString() })
     .eq("id", id);
   return !error;
 }
@@ -440,9 +484,16 @@ export async function getOtherPaymentsFromMerchant(
 export async function setCategoryForIds(ids: string[], category: string): Promise<boolean> {
   if (!supabase || ids.length === 0) return false;
   const trimmed = category.trim();
+  // Bulk-apply only ever targets transactions whose category is changing
+  // (callers pre-filter out ones already matching), so any sub-category they
+  // had is always stale for the new category — clear it unconditionally.
   const { error } = await supabase
     .from("transactions")
-    .update({ category: trimmed.length > 0 ? trimmed : null, updated_at: new Date().toISOString() })
+    .update({
+      category: trimmed.length > 0 ? trimmed : null,
+      subcategory: null,
+      updated_at: new Date().toISOString(),
+    })
     .in("id", ids);
   return !error;
 }

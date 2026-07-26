@@ -1,10 +1,21 @@
 import { Capacitor, registerPlugin } from "@capacitor/core";
 
+export interface CategoryBreakdownSegment {
+  name: string | null;
+  color: string;
+  amountCents: number;
+}
+
+export interface CategoryBreakdownPayload {
+  category: string;
+  color: string;
+  amountCents: number;
+  subcategories: CategoryBreakdownSegment[];
+}
+
 export interface WidgetBridgePlugin {
   setSpentToday(options: { amount: string }): Promise<void>;
-  setCategoryBreakdown(options: {
-    categories: { category: string; amountCents: number }[];
-  }): Promise<void>;
+  setCategoryBreakdown(options: { categories: CategoryBreakdownPayload[] }): Promise<void>;
   openNotificationAccessSettings(): Promise<void>;
   getNotificationAccessStatus(): Promise<{ enabled: boolean }>;
   getNotificationSummary(): Promise<NativeNotificationSummary>;
@@ -29,6 +40,10 @@ export interface ScannedPayment {
   // Only populated on payments read back from Supabase; the native store
   // and file imports never carry a photo.
   photoUrl?: string | null;
+  // Supabase-only, like photoUrl above — never round-tripped through the
+  // native today-cache (see the comment in supabase.ts's syncPayments),
+  // since that cache would otherwise clobber it back to null on every poll.
+  subcategory?: string | null;
 }
 
 export interface NotificationSummary {
@@ -54,9 +69,7 @@ export async function syncWidgetTotal(amount: string): Promise<void> {
   }
 }
 
-export async function syncCategoryBreakdown(
-  categories: { category: string; amountCents: number }[],
-): Promise<void> {
+export async function syncCategoryBreakdown(categories: CategoryBreakdownPayload[]): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   try {
     await WidgetBridge.setCategoryBreakdown({ categories });

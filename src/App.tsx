@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useState } from "react";
-import { Settings } from "lucide-react";
+import { Fragment, useEffect, useState, type CSSProperties } from "react";
+import { Settings, ChevronDown, ChevronRight } from "lucide-react";
 import { NotificationScanner } from "./components/NotificationScanner";
 import { parseStatementFile } from "./importPayments";
 import {
@@ -20,6 +20,7 @@ import {
   getMonthlyCategoryTotals,
   getPaymentsForPeriod,
   updatePaymentCategory,
+  updatePaymentSubcategory,
   getOtherPaymentsFromMerchant,
   setCategoryForIds,
   markPaymentDeleted,
@@ -42,13 +43,16 @@ import {
 } from "./supabase";
 import { captureReceiptPhoto } from "./receipt";
 import { extractReceiptItems } from "./ocr";
+import { inferCategory, buildBarSegments } from "./categories";
 import {
-  CATEGORIES,
-  categoryClassName,
-  inferCategory,
-  loadCustomCategories,
-  saveCustomCategories,
-} from "./categories";
+  getCategories,
+  createCategory,
+  renameCategory,
+  renameSubcategory,
+  deleteCategory,
+  deleteSubcategory,
+  type CategoryDef,
+} from "./categoriesApi";
 
 export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("not-configured");
@@ -58,6 +62,12 @@ export default function App() {
   const [importMessage, setImportMessage] = useState("");
   const [openPaymentMenuId, setOpenPaymentMenuId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [manageCategoriesOpen, setManageCategoriesOpen] = useState(false);
+  const [deletePrompt, setDeletePrompt] = useState<
+    | { kind: "category"; category: CategoryDef }
+    | { kind: "subcategory"; category: CategoryDef; subName: string }
+    | null
+  >(null);
   const [breakdowns, setBreakdowns] = useState<Record<string, TransactionBreakdown>>({});
   const [scanBusyId, setScanBusyId] = useState<string | null>(null);
   const [momentBusyId, setMomentBusyId] = useState<string | null>(null);
@@ -65,8 +75,11 @@ export default function App() {
   const [itemDraftName, setItemDraftName] = useState("");
   const [itemDraftPrice, setItemDraftPrice] = useState("");
   const [breakdownMessage, setBreakdownMessage] = useState("");
-  const [customCategories, setCustomCategories] = useState<string[]>(() => loadCustomCategories());
+  const [categories, setCategories] = useState<CategoryDef[]>([]);
   const [categoryDraft, setCategoryDraft] = useState("");
+  const [subcategoryDraft, setSubcategoryDraft] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [collapseDaily, setCollapseDaily] = useState(false);
   const [periodRange, setPeriodRange] = useState<CategoryRange>("month");
   const [periodDate, setPeriodDate] = useState(() => new Date());
   const [periodPayments, setPeriodPayments] = useState<ScannedPayment[]>([]);
@@ -83,6 +96,10 @@ export default function App() {
     payments: ScannedPayment[];
   } | null>(null);
   const [bulkMessage, setBulkMessage] = useState("");
+
+  const categoryColorMap = new Map(categories.map((item) => [item.name.toLowerCase(), item.color]));
+  const sortedCategories = [...categories].sort((a, b) => (a.name === "Other" ? 1 : b.name === "Other" ? -1 : 0));
+  const sortedCategoryNames = sortedCategories.map((item) => item.name);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,9 +129,48 @@ export default function App() {
     };
   }, [openPaymentMenuId]);
 
+  useEffect(() => {
+    async function initCategories() {
+      if (!isSupabaseConfigured()) return;
+      let list = await getCategories();
+
+      // One-time bridge for categories created before this feature existed
+      // (previously stored only in this browser's localStorage). Relies on
+      // createCategory's case-insensitive dedupe rather than a "ran once
+      // ever" flag, so it self-heals if Supabase wasn't configured yet the
+      // first time this ran.
+      const existingNames = new Set(list.map((item) => item.name.toLowerCase()));
+      for (const legacyName of loadLegacyCustomCategoryNames()) {
+        if (existingNames.has(legacyName.toLowerCase())) continue;
+        const created = await createCategory(legacyName, list.length);
+        if (created) {
+          list = [...list, created];
+          existingNames.add(created.name.toLowerCase());
+        }
+      }
+
+      setCategories(list);
+    }
+
+    void initCategories();
+  }, []);
+
   async function syncMonthlyCategoryWidget() {
     const totals = await getMonthlyCategoryTotals();
-    await syncCategoryBreakdown(totals);
+    const payload = totals.map((item) => {
+      const color = categoryColorMap.get(item.category.toLowerCase()) ?? "#8b9cb3";
+      return {
+        category: item.category,
+        color,
+        amountCents: item.amountCents,
+        subcategories: buildBarSegments(item, color).map((segment) => ({
+          name: segment.label,
+          color: segment.color,
+          amountCents: segment.amountCents,
+        })),
+      };
+    });
+    await syncCategoryBreakdown(payload);
   }
 
   async function loadPeriodData() {
@@ -230,7 +286,7 @@ export default function App() {
     await refreshSummary();
   }
 
-  async function chooseCategory(id: string, category: string, merchant?: string) {
+  async function chooseCategory(id: string, category: string, merchant: string, previousCategory: string) {
     // Best-effort: keeps the native widget's cache in sync, but this silently
     // no-ops if the payment already rolled out of the native today-cache
     // (or was added via manual entry/import), so it must never be relied on
@@ -241,11 +297,23 @@ export default function App() {
       // native store unavailable (e.g. web build) — ignore, Supabase update still applies
     }
 
-    const ok = await updatePaymentCategory(id, category);
+    // Sub-categories are scoped to their parent category, so only clear the
+    // existing one when the category is actually changing — otherwise
+    // re-tapping the already-selected chip would silently wipe a sub-category
+    // the user just picked in this same menu session.
+    const ok = await updatePaymentCategory(id, category, { clearSubcategory: category !== previousCategory });
     if (!ok) {
       setFormMessage("Could not set category.");
     }
-    setOpenPaymentMenuId(null);
+    setSubcategoryDraft("");
+
+    // Keep the menu open when the newly-picked category has sub-categories to
+    // choose from (the row revealed below needs to still be reachable);
+    // otherwise close immediately, preserving today's one-tap behaviour.
+    const hasSubcategories = (categories.find((item) => item.name === category)?.subcategories.length ?? 0) > 0;
+    if (!hasSubcategories) {
+      setOpenPaymentMenuId(null);
+    }
     await refreshSummary();
 
     if (ok && merchant) {
@@ -255,6 +323,14 @@ export default function App() {
         setBulkPrompt({ merchant, category, payments: others });
       }
     }
+  }
+
+  async function chooseSubcategory(id: string, subcategory: string) {
+    const ok = await updatePaymentSubcategory(id, subcategory);
+    if (!ok) setFormMessage("Could not set sub-category.");
+    setOpenPaymentMenuId(null);
+    setSubcategoryDraft("");
+    await refreshSummary();
   }
 
   async function applyBulkCategory() {
@@ -277,21 +353,122 @@ export default function App() {
     await refreshSummary();
   }
 
-  async function addCategory(id: string, merchant: string) {
+  async function addCategory(id: string, merchant: string, previousCategory: string) {
     const name = categoryDraft.trim();
     if (!name) return;
 
-    const isNew = ![...CATEGORIES, ...customCategories].some(
-      (option) => option.toLowerCase() === name.toLowerCase(),
-    );
-    if (isNew) {
-      const next = [...customCategories, name];
-      setCustomCategories(next);
-      saveCustomCategories(next);
+    const created = await createCategory(name, categories.length);
+    if (!created) {
+      setFormMessage("Could not add category.");
+      return;
     }
+    setCategories((prev) => (prev.some((item) => item.id === created.id) ? prev : [...prev, created]));
 
     setCategoryDraft("");
-    await chooseCategory(id, name, merchant);
+    await chooseCategory(id, created.name, merchant, previousCategory);
+  }
+
+  async function addSubcategory(id: string, categoryId: number) {
+    const name = subcategoryDraft.trim();
+    if (!name) return;
+
+    // A sub-category has no existence apart from being set on a transaction
+    // (see categoriesApi.ts) — setting it here via chooseSubcategory is the
+    // only "creation" step needed; just track it locally so it shows up as a
+    // pickable chip going forward.
+    setCategories((prev) =>
+      prev.map((item) =>
+        item.id === categoryId && !item.subcategories.some((s) => s.toLowerCase() === name.toLowerCase())
+          ? { ...item, subcategories: [...item.subcategories, name].sort((a, b) => a.localeCompare(b)) }
+          : item,
+      ),
+    );
+
+    await chooseSubcategory(id, name);
+  }
+
+  async function handleRenameCategory(category: CategoryDef) {
+    const next = window.prompt(`Rename "${category.name}" to:`, category.name);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === category.name) return;
+
+    const updated = await renameCategory(category, trimmed);
+    if (!updated) {
+      setFormMessage(`Could not rename "${category.name}" — that name may already be in use.`);
+      return;
+    }
+    setCategories((prev) => prev.map((item) => (item.id === category.id ? updated : item)));
+    if (categoryFilter === category.name) setCategoryFilter(updated.name);
+    await refreshSummary();
+  }
+
+  function handleDeleteCategory(category: CategoryDef) {
+    setDeletePrompt({ kind: "category", category });
+  }
+
+  async function handleRenameSubcategory(category: CategoryDef, subName: string) {
+    const next = window.prompt(`Rename "${subName}" to:`, subName);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === subName) return;
+
+    const updated = await renameSubcategory(category, subName, trimmed);
+    if (!updated) {
+      setFormMessage(`Could not rename "${subName}".`);
+      return;
+    }
+    setCategories((prev) =>
+      prev.map((item) =>
+        item.id === category.id
+          ? {
+              ...item,
+              subcategories: item.subcategories
+                .map((s) => (s === subName ? updated : s))
+                .sort((a, b) => a.localeCompare(b)),
+            }
+          : item,
+      ),
+    );
+    await refreshSummary();
+  }
+
+  function handleDeleteSubcategory(category: CategoryDef, subName: string) {
+    setDeletePrompt({ kind: "subcategory", category, subName });
+  }
+
+  async function confirmDelete() {
+    if (!deletePrompt) return;
+
+    if (deletePrompt.kind === "category") {
+      const { category } = deletePrompt;
+      const ok = await deleteCategory(category);
+      if (!ok) {
+        setFormMessage(`Could not delete "${category.name}".`);
+        setDeletePrompt(null);
+        return;
+      }
+      setCategories((prev) => prev.filter((item) => item.id !== category.id));
+      if (categoryFilter === category.name) setCategoryFilter(null);
+    } else {
+      const { category, subName } = deletePrompt;
+      const ok = await deleteSubcategory(category, subName);
+      if (!ok) {
+        setFormMessage(`Could not delete "${subName}".`);
+        setDeletePrompt(null);
+        return;
+      }
+      setCategories((prev) =>
+        prev.map((item) =>
+          item.id === category.id
+            ? { ...item, subcategories: item.subcategories.filter((s) => s !== subName) }
+            : item,
+        ),
+      );
+    }
+
+    setDeletePrompt(null);
+    await refreshSummary();
   }
 
   function togglePaymentMenu(id: string) {
@@ -446,10 +623,29 @@ export default function App() {
   }
 
   const maxCategoryAmount = Math.max(0, ...periodTotals.map((item) => item.amountCents));
-  const categoryTotals = periodTotals.map((item) => ({
-    ...item,
-    percent: maxCategoryAmount > 0 ? Math.max(6, Math.round((item.amountCents / maxCategoryAmount) * 100)) : 0,
-  }));
+  const categoryTotals = periodTotals.map((item) => {
+    const color = categoryColorMap.get(item.category.toLowerCase()) ?? "#8b9cb3";
+    return {
+      ...item,
+      percent: maxCategoryAmount > 0 ? Math.max(6, Math.round((item.amountCents / maxCategoryAmount) * 100)) : 0,
+      color,
+      segments: buildBarSegments(item, color),
+    };
+  });
+
+  const filteredPayments = categoryFilter
+    ? periodPayments.filter((payment) => (payment.category ?? inferCategory(payment.merchant)) === categoryFilter)
+    : periodPayments;
+
+  const dailyTotals = (() => {
+    const totals = new Map<string, number>();
+    for (const payment of filteredPayments) {
+      totals.set(payment.paymentDate, (totals.get(payment.paymentDate) ?? 0) + payment.amountCents);
+    }
+    return [...totals.entries()]
+      .map(([date, amountCents]) => ({ date, amountCents }))
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  })();
 
   return (
     <main className="app app--scanner">
@@ -468,7 +664,9 @@ export default function App() {
               <Settings aria-hidden="true" size={22} strokeWidth={2.25} />
             </button>
             {settingsOpen && (
-              <div className="settings-menu">
+              <>
+                <div className="settings-menu-backdrop" onClick={() => setSettingsOpen(false)} />
+                <div className="settings-menu">
                 <button
                   type="button"
                   className="settings-menu__item"
@@ -477,6 +675,95 @@ export default function App() {
                 >
                   Notification scanner settings
                 </button>
+                <div className="settings-menu__section">
+                  <p className="settings-menu__label">Filter by category</p>
+                  <select
+                    className="settings-menu__select"
+                    value={categoryFilter ?? ""}
+                    onChange={(event) => setCategoryFilter(event.target.value || null)}
+                  >
+                    <option value="">All categories</option>
+                    {sortedCategoryNames.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="settings-menu__section">
+                  <label className="settings-menu__checkbox">
+                    <input
+                      type="checkbox"
+                      checked={collapseDaily}
+                      onChange={(event) => setCollapseDaily(event.target.checked)}
+                    />
+                    Show daily totals only
+                  </label>
+                </div>
+                <div className="settings-menu__section">
+                  <button
+                    type="button"
+                    className="settings-menu__collapsible-label"
+                    aria-expanded={manageCategoriesOpen}
+                    onClick={() => setManageCategoriesOpen((open) => !open)}
+                  >
+                    <span>Manage categories</span>
+                    {manageCategoriesOpen ? (
+                      <ChevronDown aria-hidden="true" size={16} />
+                    ) : (
+                      <ChevronRight aria-hidden="true" size={16} />
+                    )}
+                  </button>
+                  {manageCategoriesOpen && (
+                  <ul className="manage-categories">
+                    {sortedCategories.map((cat) => (
+                      <li key={cat.id} className="manage-categories__category">
+                        <div className="manage-categories__row">
+                          <span
+                            className="payment-category"
+                            style={{ "--category-color": cat.color } as CSSProperties}
+                          >
+                            {cat.name}
+                          </span>
+                          <div className="manage-categories__actions">
+                            <button type="button" onClick={() => void handleRenameCategory(cat)}>
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              className="manage-categories__delete"
+                              onClick={() => void handleDeleteCategory(cat)}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                        {cat.subcategories.length > 0 && (
+                          <ul className="manage-categories__subcategories">
+                            {cat.subcategories.map((sub) => (
+                              <li key={sub} className="manage-categories__row">
+                                <span>{sub}</span>
+                                <div className="manage-categories__actions">
+                                  <button type="button" onClick={() => void handleRenameSubcategory(cat, sub)}>
+                                    Rename
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="manage-categories__delete"
+                                    onClick={() => void handleDeleteSubcategory(cat, sub)}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  )}
+                </div>
                 <div className="settings-menu__section">
                   <p className="settings-menu__label">Add missed payment</p>
                   <div className="settings-menu__fields">
@@ -510,7 +797,8 @@ export default function App() {
                   </label>
                   {importMessage && <p className="manual-entry__message">{importMessage}</p>}
                 </div>
-              </div>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -588,14 +876,35 @@ export default function App() {
             {categoryTotals.map((item) => (
               <li key={item.category} className="category-chart__row">
                 <div className="category-chart__meta">
-                  <span>{item.category}</span>
+                  <span>
+                    {item.category}
+                    {item.subcategories.length > 0 && (
+                      <span className="category-chart__subcategories">
+                        {" "}
+                        | {item.subcategories.map((sub) => sub.subcategory).join(", ")}
+                      </span>
+                    )}
+                  </span>
                   <strong>{formatGbp(item.amountCents)}</strong>
                 </div>
                 <div className="category-chart__track" aria-hidden="true">
-                  <div
-                    className={`category-chart__bar category-chart__bar--${categoryClassName(item.category)}`}
-                    style={{ width: `${item.percent}%` }}
-                  />
+                  {item.segments.length > 0 ? (
+                    <div className="category-chart__bar" style={{ width: `${item.percent}%` }}>
+                      {item.segments.map((segment) => (
+                        <div
+                          key={segment.key || "remainder"}
+                          className="category-chart__segment"
+                          style={{ flexGrow: segment.amountCents, flexBasis: 0, background: segment.color }}
+                          title={segment.label ?? undefined}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div
+                      className="category-chart__bar"
+                      style={{ width: `${item.percent}%`, background: item.color }}
+                    />
+                  )}
                 </div>
               </li>
             ))}
@@ -610,17 +919,33 @@ export default function App() {
       <section className="last-alert">
         <div className="last-alert__header">
           <p className="last-alert__label">Payments</p>
+          {categoryFilter && (
+            <button type="button" className="clear-filter-btn" onClick={() => setCategoryFilter(null)}>
+              {categoryFilter} ×
+            </button>
+          )}
         </div>
-        {periodPayments.length > 0 ? (
+        {filteredPayments.length > 0 ? (
+          collapseDaily ? (
+            <ul className="payment-list">
+              {dailyTotals.map((day) => (
+                <li key={day.date} className="daily-total-row">
+                  <span>{dateDividerLabel(day.date, periodRange)}</span>
+                  <strong>{formatGbp(day.amountCents)}</strong>
+                </li>
+              ))}
+            </ul>
+          ) : (
           <ul className="payment-list">
             {(() => {
-              const allCategories = [...CATEGORIES.slice(0, -1), ...customCategories, "Other"];
-              return periodPayments.map((payment, index) => {
+              return filteredPayments.map((payment, index) => {
               const showDateDivider =
                 periodRange !== "day" &&
-                (index === 0 || periodPayments[index - 1]?.paymentDate !== payment.paymentDate);
+                (index === 0 || filteredPayments[index - 1]?.paymentDate !== payment.paymentDate);
               const menuOpen = openPaymentMenuId === payment.id;
               const category = payment.category ?? inferCategory(payment.merchant);
+              const selectedCategoryDef = categories.find((item) => item.name === category);
+              const categoryColor = categoryColorMap.get(category.toLowerCase()) ?? "#8b9cb3";
               const rowUrl = getSupabaseRowUrl(payment.id);
               const breakdown = breakdowns[payment.id];
               const items = breakdown?.items ?? [];
@@ -647,9 +972,17 @@ export default function App() {
                     )}
                     <div className="last-alert__merchant">
                       <span>{payment.merchant}</span>
-                      <span className={`payment-category payment-category--${categoryClassName(category)}`}>
-                        {category}
-                      </span>
+                      <div className="payment-category-row">
+                        <span
+                          className="payment-category"
+                          style={{ "--category-color": categoryColor } as CSSProperties}
+                        >
+                          {category}
+                        </span>
+                        {payment.subcategory && (
+                          <span className="payment-subcategory">{payment.subcategory}</span>
+                        )}
+                      </div>
                       {orphanedIds.has(payment.id) && (
                         <span className="payment-orphan-flag" title="No matching statement transaction found">
                           No statement match
@@ -704,7 +1037,7 @@ export default function App() {
                         <div className="payment-menu__body">
                           <p className="payment-menu__label">Category</p>
                           <div className="payment-menu__categories">
-                            {allCategories.map((option) => (
+                            {sortedCategoryNames.map((option) => (
                               <button
                                 key={option}
                                 type="button"
@@ -713,7 +1046,7 @@ export default function App() {
                                     ? "payment-menu__category payment-menu__category--active"
                                     : "payment-menu__category"
                                 }
-                                onClick={() => void chooseCategory(payment.id, option, payment.merchant)}
+                                onClick={() => void chooseCategory(payment.id, option, payment.merchant, category)}
                               >
                                 {option}
                               </button>
@@ -726,10 +1059,48 @@ export default function App() {
                               placeholder="New category"
                               inputMode="text"
                             />
-                            <button type="button" onClick={() => void addCategory(payment.id, payment.merchant)}>
+                            <button
+                              type="button"
+                              onClick={() => void addCategory(payment.id, payment.merchant, category)}
+                            >
                               Add
                             </button>
                           </div>
+                          {selectedCategoryDef && (
+                            <>
+                              <p className="payment-menu__label">Sub-category</p>
+                              <div className="payment-menu__categories">
+                                {selectedCategoryDef.subcategories.map((sub) => (
+                                  <button
+                                    key={sub}
+                                    type="button"
+                                    className={
+                                      sub === payment.subcategory
+                                        ? "payment-menu__category payment-menu__category--active"
+                                        : "payment-menu__category"
+                                    }
+                                    onClick={() => void chooseSubcategory(payment.id, sub)}
+                                  >
+                                    {sub}
+                                  </button>
+                                ))}
+                              </div>
+                              <div className="payment-menu__add-category">
+                                <input
+                                  value={subcategoryDraft}
+                                  onChange={(event) => setSubcategoryDraft(event.target.value)}
+                                  placeholder="New sub-category"
+                                  inputMode="text"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => void addSubcategory(payment.id, selectedCategoryDef.id)}
+                                >
+                                  Add
+                                </button>
+                              </div>
+                            </>
+                          )}
                           {isSupabaseConfigured() && (
                             <div className="payment-menu__section">
                               <p className="payment-menu__label">Receipt</p>
@@ -863,8 +1234,11 @@ export default function App() {
               });
             })()}
           </ul>
+          )
         ) : (
-          <p className="last-alert__empty">No payments in this period.</p>
+          <p className="last-alert__empty">
+            {categoryFilter ? `No ${categoryFilter} payments in this period.` : "No payments in this period."}
+          </p>
         )}
       </section>
 
@@ -971,7 +1345,10 @@ export default function App() {
                     <li key={payment.id} className="last-alert__row">
                       <div className="last-alert__merchant">
                         <span>{payment.paymentDate}</span>
-                        <span className={`payment-category payment-category--${categoryClassName(current)}`}>
+                        <span
+                          className="payment-category"
+                          style={{ "--category-color": categoryColorMap.get(current.toLowerCase()) ?? "#8b9cb3" } as CSSProperties}
+                        >
                           {current}
                         </span>
                       </div>
@@ -993,8 +1370,65 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {deletePrompt && (
+        <div className="payment-menu-overlay">
+          <div className="payment-menu-backdrop" onClick={() => setDeletePrompt(null)} />
+          <div className="payment-menu" role="dialog" aria-modal="true" aria-label="Confirm delete">
+            <button
+              type="button"
+              className="payment-menu__handle"
+              aria-label="Close"
+              onClick={() => setDeletePrompt(null)}
+            />
+            <div className="payment-menu__sheet-header">
+              <div className="payment-menu__sheet-title">
+                <span>
+                  {deletePrompt.kind === "category"
+                    ? `Delete "${deletePrompt.category.name}"?`
+                    : `Delete "${deletePrompt.subName}"?`}
+                </span>
+                <strong>
+                  {deletePrompt.kind === "category"
+                    ? "Any transactions using it will become uncategorized."
+                    : "Any transactions using it will lose that sub-category."}
+                </strong>
+              </div>
+              <button
+                type="button"
+                className="payment-menu__close"
+                aria-label="Close menu"
+                onClick={() => setDeletePrompt(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="payment-menu__footer">
+              <button type="button" className="link-statement-btn" onClick={() => setDeletePrompt(null)}>
+                Cancel
+              </button>
+              <button type="button" className="delete-payment-btn" onClick={() => void confirmDelete()}>
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
+}
+
+// One-off read of the localStorage key this app used for custom categories
+// before they moved to Supabase — only needed for the one-time migration in
+// initCategories, so it isn't worth re-adding as a categories.ts export.
+function loadLegacyCustomCategoryNames(): string[] {
+  try {
+    const raw = localStorage.getItem("customCategories");
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseAmountCents(value: string): number {

@@ -10,33 +10,19 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.os.Bundle;
 import android.text.TextPaint;
 import android.widget.RemoteViews;
 
 import java.text.NumberFormat;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 public class MonthlyCategoryWidget extends AppWidgetProvider {
 
     private static final int MAX_CATEGORIES = 6;
-    private static final Map<String, Integer> CATEGORY_COLORS = new HashMap<>();
-
-    static {
-        CATEGORY_COLORS.put("transport", Color.parseColor("#3D9EFF"));
-        CATEGORY_COLORS.put("groceries", Color.parseColor("#52B788"));
-        CATEGORY_COLORS.put("food", Color.parseColor("#F59E0B"));
-        CATEGORY_COLORS.put("shopping", Color.parseColor("#C084FC"));
-        CATEGORY_COLORS.put("entertainment", Color.parseColor("#F472B6"));
-        CATEGORY_COLORS.put("bills", Color.parseColor("#EF4444"));
-        CATEGORY_COLORS.put("travel", Color.parseColor("#22D3EE"));
-    }
-
-    private static final int DEFAULT_COLOR = Color.parseColor("#8B9CB3");
     private static final int TRACK_COLOR = Color.parseColor("#232B3A");
     private static final int LABEL_COLOR = Color.parseColor("#8B9CB3");
     private static final int AMOUNT_COLOR = Color.parseColor("#E8EDF4");
@@ -146,9 +132,33 @@ public class MonthlyCategoryWidget extends AppWidgetProvider {
 
             float fraction = maxAmount > 0 ? (float) entry.amountCents / maxAmount : 0f;
             float barWidth = Math.max(barHeight, barMaxWidth * fraction);
-            barPaint.setColor(colorFor(entry.category));
             RectF fill = new RectF(barLeft, barTop, barLeft + barWidth, barTop + barHeight);
-            canvas.drawRoundRect(fill, barHeight / 2f, barHeight / 2f, barPaint);
+
+            if (entry.subcategories.isEmpty()) {
+                barPaint.setColor(entry.color);
+                canvas.drawRoundRect(fill, barHeight / 2f, barHeight / 2f, barPaint);
+            } else {
+                // Sub-category amounts (including the pre-computed "remainder"
+                // segment for any not-yet-sub-categorized spend) always sum to
+                // entry.amountCents exactly, mirroring the web bar chart's
+                // flex-grow segments — clip to the rounded fill shape first so
+                // square-cornered adjacent rects don't poke out past it.
+                canvas.save();
+                Path clip = new Path();
+                clip.addRoundRect(fill, barHeight / 2f, barHeight / 2f, Path.Direction.CW);
+                canvas.clipPath(clip);
+
+                float segmentLeft = barLeft;
+                for (CategoryBreakdownStore.SubEntry sub : entry.subcategories) {
+                    float segmentFraction = entry.amountCents > 0 ? (float) sub.amountCents / entry.amountCents : 0f;
+                    float segmentWidth = barWidth * segmentFraction;
+                    barPaint.setColor(sub.color);
+                    canvas.drawRect(segmentLeft, barTop, segmentLeft + segmentWidth, barTop + barHeight, barPaint);
+                    segmentLeft += segmentWidth;
+                }
+
+                canvas.restore();
+            }
 
             canvas.drawText(
                     formatGbp(entry.amountCents),
@@ -158,11 +168,6 @@ public class MonthlyCategoryWidget extends AppWidgetProvider {
         }
 
         return bitmap;
-    }
-
-    private static int colorFor(String category) {
-        Integer color = CATEGORY_COLORS.get(category.toLowerCase(Locale.UK));
-        return color == null ? DEFAULT_COLOR : color;
     }
 
     private static void drawEmptyState(Canvas canvas, int widthPx, int heightPx, float density) {

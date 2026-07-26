@@ -121,7 +121,24 @@ public class WidgetBridgePlugin extends Plugin {
                 JSONObject item = categories.getJSONObject(i);
                 JSONObject entry = new JSONObject();
                 entry.put("category", item.optString("category", "Other"));
+                entry.put("color", item.optString("color", "#8B9CB3"));
                 entry.put("amountCents", item.optInt("amountCents", 0));
+
+                org.json.JSONArray subcategories = new org.json.JSONArray();
+                org.json.JSONArray sourceSubcategories = item.optJSONArray("subcategories");
+                if (sourceSubcategories != null) {
+                    for (int j = 0; j < sourceSubcategories.length(); j += 1) {
+                        JSONObject subItem = sourceSubcategories.optJSONObject(j);
+                        if (subItem == null) continue;
+                        JSONObject subEntry = new JSONObject();
+                        subEntry.put("name", subItem.opt("name"));
+                        subEntry.put("color", subItem.optString("color", "#8B9CB3"));
+                        subEntry.put("amountCents", subItem.optInt("amountCents", 0));
+                        subcategories.put(subEntry);
+                    }
+                }
+                entry.put("subcategories", subcategories);
+
                 stored.put(entry);
             }
             CategoryBreakdownStore.save(getContext(), stored);
