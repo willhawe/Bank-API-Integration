@@ -4,6 +4,8 @@
 
 An Android + React app that turns three unstructured sources — payment notifications, bank statement exports, and photographed receipts — into a single reconciled, categorized transaction ledger with home-screen widgets. No bank API, OAuth grant, or third-party aggregator is used anywhere in the pipeline; every source is either generated on-device or manually exported by the user.
 
+<img src="docs/screenshot-month.jpg" alt="Month view: category totals and spend bar chart" width="320">
+
 ## Pipeline
 
 ```
